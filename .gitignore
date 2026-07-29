@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.egg-info/
+dist/
+.env
+.env.bak*
+.env.local
+/watch/
+/state/
+/tokens/

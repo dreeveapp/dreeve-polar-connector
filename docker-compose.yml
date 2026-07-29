@@ -1,0 +1,43 @@
+services:
+  # The connector itself.
+  #
+  # First run:
+  #   1. Create a client at https://admin.polaraccesslink.com and register
+  #      http://<this-host>:8080/callback as its redirect URL.
+  #   2. Put the client id and secret in .env, along with PUBLIC_URL=http://<this-host>:8080.
+  #   3. docker compose up -d
+  #   4. Open http://<this-host>:8080/authorize and approve access.
+  #
+  # With HTTP_ADDR=off there is no page to open; use
+  #   docker compose run --rm polar-connector login
+  #
+  # Note: env_file is read when the container is *created*, not when it starts, so changed variables
+  # need `docker compose up -d --force-recreate`, not `restart`.
+  polar-connector:
+    build:
+      context: .
+      target: runtime
+    image: ghcr.io/cgtobi/dreeve-polar-connector
+    container_name: dreeve-polar-connector
+    restart: unless-stopped
+    env_file:
+      - path: ./.env
+        required: false
+    volumes:
+      # Dreeve's watch folder. Point this at the real one, read-write: Dreeve deletes what it imports.
+      - ./watch:/watch
+      - ./state:/state
+      # Holds the access token and the webhook signing key. Back this up; do not share it.
+      - ./tokens:/tokens
+    ports:
+      - '8080:8080'
+
+  # Toolchain container: everything runs through `make dcr cmd="..."`. Not part of `up`.
+  python-cli:
+    build:
+      context: .
+      target: dev
+    working_dir: /app
+    volumes:
+      - .:/app
+    profiles: [tools]

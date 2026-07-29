@@ -1,0 +1,101 @@
+[project]
+name = "dreeve-polar-connector"
+description = "Syncs Polar Flow training sessions into Dreeve's watch folder"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Tobias Sauerwein" }]
+dynamic = ["version"]
+dependencies = [
+    "aiohttp>=3.9,<4.0",
+    "pydantic>=2.7,<3.0",
+    "tenacity>=8.1,<10",
+]
+
+[project.scripts]
+dreeve-polar-connector = "dreeve_polar_connector.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/cgtobi/dreeve-polar-connector"
+Issues = "https://github.com/cgtobi/dreeve-polar-connector/issues"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/dreeve_polar_connector/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dreeve_polar_connector"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+# Ruff formats Python code fences inside Markdown. Left unexcluded, every `ruff format` run rewrites
+# the code samples in docs/, and `ruff format --check` fails CI on a document rather than on code.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "DTZ",   # flake8-datetimez: every datetime in this project is timezone aware
+    "PTH",   # flake8-use-pathlib
+    "SIM",   # flake8-simplify
+    "TID",   # flake8-tidy-imports
+    "ARG",   # flake8-unused-arguments
+    "ASYNC", # flake8-async
+    "S",     # flake8-bandit: this project handles OAuth tokens and an HMAC signing key end to end
+    "RUF",   # ruff specific rules
+]
+ignore = [
+    "N818",  # exceptions read as domain concepts here (InvalidConfiguration), mirroring the sibling project
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, and they hard-code obviously-fake credentials on purpose. S104 also fires on "0.0.0.0"
+# used as plain HTTP_ADDR test data, which is not a real socket bind. ASYNC240 flags synchronous
+# pathlib calls (tmp_path assertions, fixture setup) inside `async def test_...` — real for a trio/anyio
+# event loop, but these tests run under pytest-asyncio, where a brief blocking stat() or glob() on a
+# temp directory is exactly what the test is meant to do.
+"tests/**" = ["S101", "S104", "S105", "S106", "ASYNC240"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dreeve_polar_connector"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["src", "tests"]
+# Pydantic v2's plugin is what makes strict mode accurate about validators and model_config, and this
+# project models every boundary — API payloads, the ledger, the token store — with pydantic.
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
