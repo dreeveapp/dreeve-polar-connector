@@ -1,0 +1,188 @@
+name: release
+on:
+  workflow_dispatch:
+concurrency:
+  # Never cancel a release halfway through publishing an image.
+  group: release
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  verify:
+    name: Verify the bump
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Refuse a dispatch from anywhere but main
+        env:
+          REF: ${{ github.ref }}
+        # A failing step rather than a job-level `if`, which would report the run as a skipped success
+        # and leave whoever dispatched it from a branch with nothing to read. Releases are cut from main
+        # only: ci is green on branches too, so the ci gate below would not have stopped this.
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::release can only be dispatched from main, not ${REF}."
+            exit 1
+          fi
+
+      - name: Checkout
+        # Full history: the checker compares __version__ against every existing tag.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate the version bump
+        # `--allow-existing-tag` because a re-run of this workflow arrives with its own tag already
+        # pushed, and refusing that would make the whole re-run path unreachable. The tag is no longer
+        # evidence that the version shipped; the Release below is, and it is checked two steps down.
+        run: python3 scripts/release_version.py validate --allow-existing-tag
+
+      - name: Read the version
+        id: version
+        run: echo "version=$(python3 scripts/release_version.py print)" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse a version that is already released
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        # The single authority on "already released". Gating on the tag instead would block the re-run of
+        # a run that tagged the commit and then died before the Release existed.
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::v${VERSION} already has a GitHub Release."
+            exit 1
+          fi
+
+      - name: Require a green ci run for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Every required run named in full, and a run that is absent counts as a failure. A name prefix
+        # would quietly excuse any job whose name does not start with it — which is how `Lint the
+        # workflows` came to be optional, letting a release ship on a red workflow lint. The endpoint
+        # defaults to `filter=latest`, so a re-run's result replaces the one it superseded; `--paginate`
+        # because check runs come back thirty at a time.
+        run: |
+          runs=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+            --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv')
+          failed=0
+          for required in "Run CI (Python 3.12)" "Run CI (Python 3.13)" "Lint the workflows"; do
+            state=$(printf '%s\n' "$runs" | awk -F'\t' -v name="$required" '$1 == name { print $2; exit }')
+            if [ "$state" != "success" ]; then
+              echo "::error::check run '${required}' is ${state:-missing} for ${GITHUB_SHA}, not success."
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+
+  image:
+    name: Publish the image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive the image tags
+        id: tags
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        # Computed from __version__ rather than by docker/metadata-action's semver patterns, which need a
+        # tag ref that does not exist yet at this point in the run.
+        run: |
+          {
+            echo "version=${VERSION}"
+            echo "minor=${VERSION%.*}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.tags.outputs.version }}
+            type=raw,value=${{ steps.tags.outputs.minor }}
+            type=raw,value=latest
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          # Explicit, so the toolchain stage is never part of a release build.
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The arm64 build runs under emulation and is slow; caching keeps a re-run cheap.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: false
+
+  release:
+    # Tagging and releasing are one job on purpose. A tag that exists without a Release is the state the
+    # re-run path has to recover from, so the gap between the two is kept as narrow as a single job's two
+    # adjacent steps rather than spanning a job boundary, where a runner going away leaves it open.
+    name: Tag and release
+    needs: [verify, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Create and push the tag
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        # Pushed with GITHUB_TOKEN, which by design does not trigger further workflow runs, so no second
+        # build starts. An existing tag is this run's own leftover — verify has already established that
+        # no Release exists for it — so it is reused rather than treated as an error.
+        run: |
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "Tag v${VERSION} already exists; reusing it."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "v${VERSION}" --message "v${VERSION}"
+          git push origin "refs/tags/v${VERSION}"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes --verify-tag

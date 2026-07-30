@@ -42,7 +42,7 @@ packages = ["src/dreeve_polar_connector"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "scripts"]
 # Ruff formats Python code fences inside Markdown. Left unexcluded, every `ruff format` run rewrites
 # the code samples in docs/, and `ruff format --check` fails CI on a document rather than on code.
 extend-exclude = ["docs"]
@@ -79,19 +79,21 @@ ignore = [
 "tests/**" = ["S101", "S104", "S105", "S106", "ASYNC240"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["dreeve_polar_connector"]
+known-first-party = ["dreeve_polar_connector", "release_version"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
+mypy_path = "scripts"
 # Pydantic v2's plugin is what makes strict mode accurate about validators and model_config, and this
 # project models every boundary — API payloads, the ledger, the token store — with pydantic.
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["scripts"]
 addopts = "--strict-markers --strict-config"
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"

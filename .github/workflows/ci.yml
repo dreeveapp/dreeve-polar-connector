@@ -44,3 +44,15 @@ jobs:
 
       - name: Run test suite
         run: uv run pytest --cov --cov-report=term-missing
+
+  workflows:
+    name: Lint the workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Pinned image rather than a curl-to-shell installer, and a container rather than a third-party
+      # action, so nothing unreviewed runs with the workflow's token.
+      - name: Run actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color

@@ -1,7 +1,7 @@
 # Every target runs inside the dev container, so nothing but Docker has to exist on the host.
 DCR := docker compose run --rm python-cli
 
-.PHONY: help build test lint format typecheck check dcr
+.PHONY: help build test lint format typecheck check dcr hooks
 
 help:
 	@echo "build      Build the dev and runtime images"
@@ -11,6 +11,7 @@ help:
 	@echo "typecheck  Run mypy"
 	@echo "check      lint + format --check + typecheck + test"
 	@echo "dcr        Run an arbitrary command, e.g. make dcr cmd=\"uv run python -V\""
+	@echo "hooks      Install the git hooks in .githooks (validates a __version__ bump)"
 
 build:
 	docker compose build python-cli polar-connector
@@ -32,3 +33,7 @@ check:
 
 dcr:
 	$(DCR) $(cmd)
+
+hooks:
+	git config core.hooksPath .githooks
+	@echo "Installed .githooks. A commit that changes __version__ is now validated before it lands."

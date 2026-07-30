@@ -10,6 +10,12 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.32
 # ruff and mypy never have to exist on the host.
 FROM ${PYTHON_IMAGE} AS dev
 
+# git: the release-version checker's tests exercise it against throwaway repositories, and the
+# pre-commit hook it backs needs `git tag` to compare against published releases.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /uvx /usr/local/bin/
 
 # The venv deliberately lives outside /app: the source is bind mounted over /app and would

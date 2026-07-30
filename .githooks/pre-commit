@@ -1,0 +1,18 @@
+#!/bin/sh
+# Validate a version bump at the moment it is made.
+#
+# Advisory only: `release.yml` repeats every check and cannot be bypassed, so this exists for fast
+# feedback rather than enforcement. It runs on the host, not in the dev container — a hook that starts
+# Docker on every commit is a hook people uninstall.
+
+git diff --cached -U0 -- src/dreeve_polar_connector/__init__.py | grep -q '^+__version__' || exit 0
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-commit: python3 not found, skipping the version check; the release workflow still runs it." >&2
+    exit 0
+fi
+
+# `--from-index` because the guard above looks at the index, and the index is what is about to be
+# committed. Reading the working tree instead would let a bad staged version through whenever a good one
+# happened to be sitting on disk, and reject a good staged one just as easily.
+python3 scripts/release_version.py validate --from-index
