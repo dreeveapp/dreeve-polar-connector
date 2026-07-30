@@ -86,6 +86,7 @@ def build_app(
     app[WAKE] = wake
     app[OAUTH_STATES] = {}
 
+    app.router.add_get("/", root)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/status", status_report)
     app.router.add_get("/authorize", authorize)
@@ -93,6 +94,28 @@ def build_app(
     app.router.add_post("/webhook", webhook)
 
     return app
+
+
+async def root(request: web.Request) -> web.Response:
+    """A landing page that doubles as a second callback target.
+
+    Not every Polar client can register `<origin>/callback`: the admin page accepts a path, but the
+    authorization endpoint has been observed rejecting the resulting URL while accepting the bare
+    origin - at which point Polar delivers `code` and `state` here instead. Answering both paths costs
+    one route and turns that into a working browser flow rather than a dead end.
+
+    Only a request carrying OAuth parameters is treated as a callback, so an ordinary visit does not
+    consume a state or render an error page.
+    """
+    if request.query.keys() & {"code", "state", "error"}:
+        return await callback(request)
+
+    return _page(
+        200,
+        "Dreeve Polar Connector",
+        'Start at <a href="/authorize">/authorize</a> to connect a Polar account, '
+        'or read <a href="/status">/status</a> to see what this connector is doing.',
+    )
 
 
 async def healthz(request: web.Request) -> web.Response:

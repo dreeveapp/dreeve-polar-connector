@@ -70,6 +70,7 @@ class Config:
     client_id: str
     client_secret: str
     public_url: str | None
+    redirect_uri_override: str | None
     watch_dir: Path
     state_dir: Path
     tokens_dir: Path
@@ -92,7 +93,17 @@ class Config:
 
     @property
     def redirect_uri(self) -> str | None:
-        """Where Polar sends the browser back. None means "use the client's only registered URL"."""
+        """Where Polar sends the browser back. None means "use the client's only registered URL".
+
+        `REDIRECT_URI` wins over the value derived from `PUBLIC_URL`. It exists because a client's
+        registered URL is not always `<public_url>/callback`: Polar's admin page accepts a path, but its
+        authorization endpoint has been observed rejecting the result, leaving the bare origin as the
+        only value it will honour. The server answers the callback at `/` as well for that reason, so
+        `REDIRECT_URI=http://host:8080` completes the flow.
+        """
+        if self.redirect_uri_override:
+            return self.redirect_uri_override
+
         return f"{self.public_url}{CALLBACK_PATH}" if self.public_url else None
 
     @classmethod
@@ -111,6 +122,9 @@ class Config:
             client_id=reader.required_secret("POLAR_CLIENT_ID"),
             client_secret=reader.required_secret("POLAR_CLIENT_SECRET"),
             public_url=reader.url("PUBLIC_URL"),
+            # Verbatim, unlike PUBLIC_URL: Polar compares a redirect URI byte for byte against what is
+            # registered, so a trailing slash this reader helpfully stripped would fail the match.
+            redirect_uri_override=reader.text("REDIRECT_URI"),
             watch_dir=reader.path("WATCH_DIR", default="/watch"),
             state_dir=reader.path("STATE_DIR", default="/state"),
             tokens_dir=reader.path("POLAR_TOKENS", default="/tokens"),

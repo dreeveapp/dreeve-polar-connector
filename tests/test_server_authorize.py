@@ -262,3 +262,37 @@ async def test_a_rejected_exchange_is_reported_and_not_replayed(harness: _Harnes
     assert "/authorize" in await response.text()
     assert harness.polar.token_requests == 1
     assert harness.tokens.current() is None
+
+
+@pytest.mark.asyncio
+async def test_the_root_path_completes_a_callback_delivered_there(harness: _Harness) -> None:
+    # Polar delivers here when the client's registered redirect URL is a bare origin, which its
+    # authorization endpoint accepts in cases where it rejects the same origin plus '/callback'.
+    state = await _authorize_then_state(harness)
+
+    response = await harness.client.get("/", params={"code": "a-code", "state": state})
+
+    assert response.status == 200
+    stored = harness.tokens.current()
+    assert stored is not None
+    assert stored.access_token == "a-token"
+    assert harness.polar.registrations == ["dreeve-475"]
+
+
+@pytest.mark.asyncio
+async def test_the_root_path_rejects_an_unknown_state_like_the_callback_does(harness: _Harness) -> None:
+    response = await harness.client.get("/", params={"code": "a-code", "state": "never-issued"})
+
+    assert response.status == 400
+    assert harness.polar.token_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_a_plain_visit_to_the_root_path_is_a_landing_page(harness: _Harness) -> None:
+    # Without OAuth parameters nothing is claimed or spent, so a stray visit cannot break a flow in
+    # progress or render an error page at the connector's front door.
+    response = await harness.client.get("/")
+
+    assert response.status == 200
+    assert "/authorize" in await response.text()
+    assert harness.polar.token_requests == 0

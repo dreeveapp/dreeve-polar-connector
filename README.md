@@ -35,6 +35,27 @@ Until step 4 the container reports unhealthy on purpose, and `GET /status` tells
 Running headless with `HTTP_ADDR=off`? Use `docker compose run --rm polar-connector login` instead,
 which prints the URL and reads the code back from your terminal.
 
+### 😖 "Oops, something went wrong somewhere along the way."
+
+That page means Polar refused the request before showing consent, and the usual reason is a
+`redirect_uri` it does not recognise for your client. Its admin page accepts a path, but the
+authorization endpoint has been observed honouring only the bare origin for the same client.
+
+Polar validates the redirect before authentication, so you can test candidates without signing in —
+`303` means accepted, `200` means refused:
+
+```bash
+CLIENT_ID=<your client id>
+REDIRECT=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' 'http://your-host:8080/callback')
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "https://flow.polar.com/oauth2/authorization?response_type=code&client_id=${CLIENT_ID}&redirect_uri=${REDIRECT}"
+```
+
+Set `REDIRECT_URI` to whichever string Polar accepts; it is sent verbatim, trailing slash included.
+A bare origin works because the callback is served at `/` as well as at `/callback`. Omitting both
+`REDIRECT_URI` and `PUBLIC_URL` also works when the client has exactly one registered URL — Polar then
+picks it, and the code arrives at whichever of the two paths that URL points to.
+
 ## ⚡ Optional: instant delivery via webhook
 
 Set `WEBHOOK_URL` to a publicly reachable HTTPS URL ending in `/webhook` and Polar will notify this

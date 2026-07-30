@@ -199,6 +199,30 @@ def test_there_is_no_redirect_uri_without_a_public_url() -> None:
     assert Config.from_env(MINIMAL).redirect_uri is None
 
 
+def test_an_explicit_redirect_uri_overrides_the_derived_one() -> None:
+    # For clients whose registered URL is not '<public_url>/callback' - Polar's admin page takes a path
+    # but its authorization endpoint has been seen to accept only the bare origin.
+    config = Config.from_env(
+        {**MINIMAL, "PUBLIC_URL": "http://nas.local:8080", "REDIRECT_URI": "http://nas.local:8080"}
+    )
+
+    assert config.redirect_uri == "http://nas.local:8080"
+
+
+def test_an_explicit_redirect_uri_works_without_a_public_url() -> None:
+    config = Config.from_env({**MINIMAL, "REDIRECT_URI": "http://nas.local:8080"})
+
+    assert config.redirect_uri == "http://nas.local:8080"
+
+
+def test_an_explicit_redirect_uri_keeps_its_trailing_slash() -> None:
+    # Unlike PUBLIC_URL, this value is not tidied up: Polar matches it byte for byte against what is
+    # registered, and a registered URL may well end in a slash.
+    config = Config.from_env({**MINIMAL, "REDIRECT_URI": "http://nas.local:8080/"})
+
+    assert config.redirect_uri == "http://nas.local:8080/"
+
+
 def test_a_jitter_above_one_hundred_percent_is_reported() -> None:
     with pytest.raises(InvalidConfiguration, match="POLL_JITTER_PCT"):
         Config.from_env({**MINIMAL, "POLL_JITTER_PCT": "150"})
