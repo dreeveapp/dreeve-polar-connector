@@ -1,7 +1,7 @@
 <h1 align="center">Dreeve Polar Connector</h1>
 
 <p align="center">
-<a href="https://github.com/cgtobi/dreeve-polar-connector/blob/main/LICENSE"><img src="https://img.shields.io/github/license/cgtobi/dreeve-polar-connector?color=428f7e&logo=open%20source%20initiative&logoColor=white" alt="License"></a>
+<a href="https://github.com/dreeveapp/dreeve-polar-connector/blob/main/LICENSE"><img src="https://img.shields.io/github/license/dreeveapp/dreeve-polar-connector?color=428f7e&logo=open%20source%20initiative&logoColor=white" alt="License"></a>
 <a href="https://docs.dreeve.app"><img src="https://img.shields.io/badge/docs-docs.dreeve.app-428f7e?logo=readthedocs&logoColor=white" alt="Documentation"></a>
 </p>
 

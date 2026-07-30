@@ -17,7 +17,7 @@ services:
     build:
       context: .
       target: runtime
-    image: ghcr.io/cgtobi/dreeve-polar-connector
+    image: ghcr.io/dreeveapp/dreeve-polar-connector
     container_name: dreeve-polar-connector
     restart: unless-stopped
     env_file:

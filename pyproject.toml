@@ -17,8 +17,8 @@ dependencies = [
 dreeve-polar-connector = "dreeve_polar_connector.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/cgtobi/dreeve-polar-connector"
-Issues = "https://github.com/cgtobi/dreeve-polar-connector/issues"
+Homepage = "https://github.com/dreeveapp/dreeve-polar-connector"
+Issues = "https://github.com/dreeveapp/dreeve-polar-connector/issues"
 
 [dependency-groups]
 dev = [
