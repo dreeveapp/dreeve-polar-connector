@@ -13,7 +13,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from dreeve_polar_connector.config import Config
-from dreeve_polar_connector.server import build_app
+from dreeve_polar_connector.server import SECRETS, build_local_app, build_webhook_app
 from dreeve_polar_connector.status import Status
 from dreeve_polar_connector.tokens import TokenStore
 from tests.stubs import StubClock
@@ -52,7 +52,7 @@ async def make_client(tmp_path: Path) -> AsyncIterator[ClientFactory]:
         session = aiohttp.ClientSession()
         sessions.append(session)
 
-        app = build_app(
+        app = build_local_app(
             config=config,
             status=status,
             clock=StubClock(NOW),
@@ -84,6 +84,12 @@ class _Secrets:
     def add(self, value: str | None) -> None:
         if value:
             self.added.append(value)
+
+    def redact(self, text: str) -> str:
+        for value in self.added:
+            text = text.replace(value, "***")
+
+        return text
 
 
 @pytest.fixture
@@ -143,3 +149,61 @@ async def test_an_unknown_path_is_a_json_404(make_client: ClientFactory, status:
     response = await client.get("/wat")
 
     assert response.status == 404
+
+
+@pytest.mark.asyncio
+async def test_the_local_listener_does_not_serve_the_webhook(make_client: ClientFactory, status: Status) -> None:
+    # Route separation is the whole point: publishing /webhook must not publish anything else, and the
+    # operator's port must not accept Polar's deliveries either.
+    client = await make_client(status)
+
+    response = await client.post("/webhook", data=b"{}")
+
+    assert response.status == 404
+
+
+@pytest.mark.asyncio
+async def test_the_webhook_listener_serves_nothing_but_the_webhook(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    app = build_webhook_app(
+        status=Status(poll_interval=900, started_at=NOW, authorize_url=None),
+        clock=StubClock(NOW),
+        tokens=TokenStore(config.tokens_dir),
+        wake=asyncio.Event(),
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        for path in ("/", "/healthz", "/status", "/authorize", "/callback"):
+            response = await client.get(path)
+            assert response.status == 404, f"{path} must not be served on the webhook listener"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_status_redacts_secrets_that_reached_an_error_message(make_client: ClientFactory, status: Status) -> None:
+    # Status keeps up to 200 bytes of whatever Polar answered with, and the log redactor covers logs
+    # only. Without redaction here, a token echoed in an upstream error leaves over HTTP.
+    status.authorized(475)
+    status.cycle_failed("Polar said: Bearer a-real-token is invalid")
+    client = await make_client(status)
+    secrets = client.app[SECRETS]
+    secrets.add("a-real-token")
+
+    body = await (await client.get("/status")).text()
+
+    assert "a-real-token" not in body
+    assert "***" in body
+
+
+@pytest.mark.asyncio
+async def test_status_is_still_json(make_client: ClientFactory, status: Status) -> None:
+    # Redaction replaced json_response, so the content type and parseability are worth pinning.
+    status.authorized(475)
+    client = await make_client(status)
+
+    response = await client.get("/status")
+
+    assert response.content_type == "application/json"
+    assert (await response.json())["polarUser"] == 475

@@ -4,8 +4,9 @@ A connector nobody has authorized is by far the likeliest real failure here, and
 container keeps running, the logs go quiet, and nothing arrives in the watch folder. So authorization
 state is reported first-class, together with the URL to open, rather than left in a log line.
 
-There is deliberately no lock. The HTTP server and the sync loop share one event loop, so nothing in
-here is ever touched concurrently.
+There is deliberately no lock. Both HTTP listeners and the sync loop share one event loop, so nothing
+in here is ever touched concurrently — including `delivery_rejected`, which is called from the webhook
+listener while `to_dict` is served from the local one.
 """
 
 from datetime import datetime, timedelta
@@ -28,7 +29,7 @@ class AuthorizationState(StrEnum):
 
 
 class Status:
-    """Written by the loop and the server, read by the status endpoint. Same event loop throughout."""
+    """Written by the loop and both listeners, read by `/status`. Same event loop throughout."""
 
     def __init__(self, poll_interval: int, started_at: datetime, authorize_url: str | None) -> None:
         self._poll_interval = poll_interval
@@ -48,6 +49,7 @@ class Status:
         self._webhook_id: str | None = None
         self._webhook_active = False
         self._webhook_last_event: datetime | None = None
+        self._rejected_deliveries = 0
         self._rate_limit: dict[str, int | None] | None = None
 
     def authorized(self, polar_user: int) -> None:
@@ -95,6 +97,18 @@ class Status:
     def webhook_event_received(self, at: datetime) -> None:
         self._webhook_last_event = at
 
+    def delivery_rejected(self) -> int:
+        """A delivery answered with 401 — unverifiable, not merely uninteresting. Returns the new total.
+
+        Counted because the alternative symptom of a signing-key or scheme problem is silence: Polar
+        keeps delivering, this connector keeps refusing, and only the latency changes. The total is
+        returned so the caller can log the first refusal and then only every hundredth: this route is
+        published, so whoever reaches it decides how often this is called.
+        """
+        self._rejected_deliveries += 1
+
+        return self._rejected_deliveries
+
     def rate_limit_seen(
         self,
         *,
@@ -129,6 +143,10 @@ class Status:
 
         return now - since <= timedelta(seconds=self._poll_interval * UNHEALTHY_AFTER_CYCLES)
 
+    def authorization_state(self) -> AuthorizationState:
+        """Read by the server to decide whether starting a fresh authorization is legitimate."""
+        return self._authorization
+
     def to_dict(self, now: datetime) -> dict[str, Any]:
         return {
             "healthy": self.is_healthy(now),
@@ -151,6 +169,7 @@ class Status:
                 "active": self._webhook_active,
                 "id": self._webhook_id,
                 "lastEventAt": _instant(self._webhook_last_event),
+                "rejectedDeliveries": self._rejected_deliveries,
             },
             "rateLimit": self._rate_limit,
         }

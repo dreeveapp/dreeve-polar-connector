@@ -6,6 +6,7 @@ rather than halfway through its first sync cycle — and it must report every pr
 fixing environment variables one boot at a time is misery.
 """
 
+import ipaddress
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -85,6 +86,7 @@ class Config:
     download_delay_seconds: float
     max_backoff_seconds: int
     webhook_url: str | None
+    webhook_addr: str | None
     http_addr: str | None
     max_cycles: int
     log_level: str
@@ -111,11 +113,18 @@ class Config:
         reader = _EnvReader(env)
 
         http_addr = reader.http_addr("HTTP_ADDR", default="0.0.0.0:8080")
+        webhook_addr = reader.http_addr("WEBHOOK_ADDR", default=HTTP_ADDR_DISABLED)
         webhook_url = reader.text("WEBHOOK_URL")
-        if webhook_url and http_addr is None:
+        if webhook_url and webhook_addr is None:
             reader.errors.append(
-                "WEBHOOK_URL is set but HTTP_ADDR is 'off', so nothing would be listening for Polar's "
+                "WEBHOOK_URL is set but WEBHOOK_ADDR is 'off', so nothing would be listening for Polar's "
                 "deliveries. Polar deactivates a webhook after seven days of failures."
+            )
+        if _listeners_collide(http_addr, webhook_addr):
+            reader.errors.append(
+                f"HTTP_ADDR ('{http_addr}') and WEBHOOK_ADDR ('{webhook_addr}') want the same port, so the "
+                f"second listener could not bind. Give the webhook listener its own port, conventionally "
+                f"0.0.0.0:8081."
             )
 
         config = cls(
@@ -139,6 +148,7 @@ class Config:
             download_delay_seconds=reader.number("DOWNLOAD_DELAY_SECONDS", default=1.0, minimum=0.0),
             max_backoff_seconds=reader.integer("MAX_BACKOFF_SECONDS", default=21600, minimum=0),
             webhook_url=webhook_url,
+            webhook_addr=webhook_addr,
             http_addr=http_addr,
             max_cycles=reader.integer("MAX_CYCLES", default=0, minimum=0),
             log_level=reader.log_level("LOG_LEVEL", default="info"),
@@ -150,6 +160,37 @@ class Config:
             raise InvalidConfiguration(reader.errors)
 
         return config
+
+
+def _listeners_collide(http_addr: str | None, webhook_addr: str | None) -> bool:
+    """Whether the two listeners would fight over one port.
+
+    Reported here rather than left to `bind`, which raises `OSError` from inside `run` once the first
+    listener is already up — a traceback halfway through startup, which is exactly what validating
+    configuration on boot exists to avoid. Port 0 is exempt: it means "any free port", so two of them
+    cannot collide.
+    """
+    if http_addr is None or webhook_addr is None:
+        return False
+
+    local_host, _, local_port = http_addr.rpartition(":")
+    webhook_host, _, webhook_port = webhook_addr.rpartition(":")
+    if local_port != webhook_port or local_port == "0":
+        return False
+
+    # Identical hosts obviously clash, and so does a wildcard against anything: binding 0.0.0.0:8080
+    # takes the port on every interface, so 127.0.0.1:8080 can no longer have it.
+    return local_host == webhook_host or _every_interface(local_host) or _every_interface(webhook_host)
+
+
+def _every_interface(host: str) -> bool:
+    """True for '0.0.0.0', '::' and '' — the addresses that claim a port on every interface."""
+    if not host:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False
 
 
 class _EnvReader:

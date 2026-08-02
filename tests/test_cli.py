@@ -344,7 +344,7 @@ async def test_webhook_register_stores_the_webhook_and_its_signing_key(
         monkeypatch.setattr(
             "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
         )
-        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook")
+        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", WEBHOOK_ADDR="127.0.0.1:0")
         tokens = TokenStore(config.tokens_dir)
 
         exit_code = await webhook_action(config, Secrets(), tokens, Namespace(action="register"))
@@ -378,7 +378,7 @@ async def test_webhook_register_reports_registration_as_the_failed_verb(
         monkeypatch.setattr(
             "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
         )
-        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook")
+        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", WEBHOOK_ADDR="127.0.0.1:0")
         tokens = TokenStore(config.tokens_dir)
 
         with caplog.at_level(logging.ERROR):
@@ -463,7 +463,7 @@ async def test_ensure_webhook_registers_and_persists_when_nothing_is_stored(
         monkeypatch.setattr(
             "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
         )
-        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook")
+        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", WEBHOOK_ADDR="127.0.0.1:0")
         tokens = TokenStore(config.tokens_dir)
         status = Status(config.poll_interval, NOW, authorize_url=None)
 
@@ -479,6 +479,7 @@ async def test_ensure_webhook_registers_and_persists_when_nothing_is_stored(
             "active": True,
             "id": "wh-1",
             "lastEventAt": None,
+            "rejectedDeliveries": 0,
         }
     finally:
         await polar.close()
@@ -508,7 +509,7 @@ async def test_ensure_webhook_warns_without_crashing_when_polar_reports_none(
         monkeypatch.setattr(
             "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
         )
-        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook")
+        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", WEBHOOK_ADDR="127.0.0.1:0")
         tokens = TokenStore(config.tokens_dir)
         await tokens.store_webhook(
             StoredWebhook(webhook_id="wh-1", signature_secret_key="s3cr3t", url="https://example.test/webhook")
@@ -537,7 +538,7 @@ async def test_ensure_webhook_activates_a_webhook_polar_reports_as_inactive(
         monkeypatch.setattr(
             "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
         )
-        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook")
+        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", WEBHOOK_ADDR="127.0.0.1:0")
         tokens = TokenStore(config.tokens_dir)
         await tokens.store_webhook(
             StoredWebhook(webhook_id="wh-1", signature_secret_key="s3cr3t", url="https://example.test/webhook")
@@ -553,6 +554,7 @@ async def test_ensure_webhook_activates_a_webhook_polar_reports_as_inactive(
             "active": True,
             "id": "wh-1",
             "lastEventAt": None,
+            "rejectedDeliveries": 0,
         }
     finally:
         await polar.close()
@@ -568,7 +570,7 @@ async def test_ensure_webhook_leaves_an_active_webhook_alone(tmp_path: Path, mon
         monkeypatch.setattr(
             "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
         )
-        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook")
+        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", WEBHOOK_ADDR="127.0.0.1:0")
         tokens = TokenStore(config.tokens_dir)
         await tokens.store_webhook(
             StoredWebhook(webhook_id="wh-1", signature_secret_key="s3cr3t", url="https://example.test/webhook")
@@ -597,7 +599,7 @@ async def test_ensure_webhook_logs_the_remediation_when_polar_already_has_one(
         monkeypatch.setattr(
             "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
         )
-        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook")
+        config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", WEBHOOK_ADDR="127.0.0.1:0")
         tokens = TokenStore(config.tokens_dir)
         status = Status(config.poll_interval, NOW, authorize_url=None)
 
@@ -624,7 +626,13 @@ async def _run_with_a_broken_signing_key_persist(
 
     monkeypatch.setattr(TokenStore, "store_webhook", _boom)
 
-    config = _config(tmp_path, WEBHOOK_URL="http://example.test/webhook", HTTP_ADDR="127.0.0.1:0", MAX_CYCLES="1")
+    config = _config(
+        tmp_path,
+        WEBHOOK_URL="http://example.test/webhook",
+        WEBHOOK_ADDR="127.0.0.1:0",
+        HTTP_ADDR="127.0.0.1:0",
+        MAX_CYCLES="1",
+    )
     secrets = Secrets([config.client_secret])
     tokens = TokenStore(config.tokens_dir)
 
@@ -638,6 +646,8 @@ async def test_a_signing_key_that_cannot_be_persisted_does_not_crash_run_and_sto
     # Before the fix, `ensure_webhook` let a raw `OSError` from `store_webhook` propagate. It was
     # called before `run`'s `try/finally`, so the exception crashed `run` outright and the `HttpServer`
     # it had already started was never stopped.
+    #
+    # Both HTTP_ADDR and WEBHOOK_ADDR are set below, so two listeners start and both must stop.
     polar = TestServer(_FakePolarWebhooks().app())
     await polar.start_server()
 
@@ -656,7 +666,7 @@ async def test_a_signing_key_that_cannot_be_persisted_does_not_crash_run_and_sto
         await polar.close()
 
     assert exit_code == EXIT_OK
-    assert stopped == [True]
+    assert stopped == [True, True]
 
 
 @pytest.mark.asyncio
@@ -677,3 +687,157 @@ async def test_a_signing_key_that_cannot_be_persisted_is_reported_with_its_remed
     assert exit_code == EXIT_OK
     assert "webhook delete" in caplog.text
     assert "gone" in caplog.text.lower()
+
+
+async def _run_and_record_served_routes(
+    config: Config, tokens: TokenStore, monkeypatch: pytest.MonkeyPatch
+) -> tuple[int, list[str]]:
+    """Runs one cycle and reports what each started listener serves, keyed off the real router."""
+    served: list[str] = []
+    real_start = HttpServer.start
+
+    async def _record(self: HttpServer) -> None:
+        await real_start(self)
+        served.append(self._describe_routes())
+
+    monkeypatch.setattr(HttpServer, "start", _record)
+    exit_code = await run(config, Secrets([config.client_secret]), tokens, Namespace())
+
+    return exit_code, served
+
+
+@pytest.mark.asyncio
+async def test_run_serves_the_webhook_on_its_own_listener(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Port 0 lets the OS pick, so this cannot collide with whatever else is listening.
+    config = _config(tmp_path, HTTP_ADDR="127.0.0.1:0", WEBHOOK_ADDR="127.0.0.1:0", MAX_CYCLES="1")
+
+    exit_code, served = await _run_and_record_served_routes(config, TokenStore(config.tokens_dir), monkeypatch)
+
+    assert exit_code == EXIT_OK
+    assert len(served) == 2
+    assert "/webhook" in served[1]
+    assert "/webhook" not in served[0]
+    assert "/authorize" in served[0]
+
+
+@pytest.mark.asyncio
+async def test_run_starts_only_the_local_listener_when_webhooks_are_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, HTTP_ADDR="127.0.0.1:0", MAX_CYCLES="1")
+
+    exit_code, served = await _run_and_record_served_routes(config, TokenStore(config.tokens_dir), monkeypatch)
+
+    assert exit_code == EXIT_OK
+    assert served == ["/, /authorize, /callback, /healthz, /status"]
+
+
+def test_logout_clears_the_authorization_and_keeps_the_webhook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The signing key is disclosed exactly once, so clearing it would force a re-registration nobody
+    # asked for.
+    monkeypatch.setattr("os.environ", _environment(tmp_path))
+    tokens_dir = tmp_path / "tokens"
+    _store_webhook_sync(tokens_dir)
+    asyncio.run(
+        TokenStore(tokens_dir).store(
+            Authorization(polar_user_id=475, access_token="a-token", member_id="dreeve-475", authorized_at=NOW)
+        )
+    )
+
+    assert main(["logout"]) == EXIT_OK
+
+    tokens = TokenStore(tokens_dir)
+    assert tokens.current() is None
+    assert tokens.webhook() is not None
+
+
+def test_logout_without_an_authorization_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # capsys rather than caplog: see the comment on the sync-once test above for why — `main()` tears
+    # down the handler caplog attached before the test body ever runs.
+    monkeypatch.setattr("os.environ", _environment(tmp_path))
+
+    assert main(["logout"]) == EXIT_OK
+
+    assert "no authorization is stored" in capsys.readouterr().err
+
+
+def test_logout_asks_for_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A running container keeps the Sync it built, so it goes on using the token it loaded. Clearing the
+    # file is not enough, and the message is the only place an operator learns that.
+    monkeypatch.setattr("os.environ", _environment(tmp_path))
+    asyncio.run(
+        TokenStore(tmp_path / "tokens").store(
+            Authorization(polar_user_id=475, access_token="a-token", member_id="dreeve-475", authorized_at=NOW)
+        )
+    )
+
+    assert main(["logout"]) == EXIT_OK
+
+    assert "Restart the connector" in capsys.readouterr().err
+
+
+def test_logout_clears_a_store_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # /authorize refuses while it cannot tell who is connected, and logout is the documented way out of
+    # that. Refusing to run here would leave deleting the file by hand as the only route.
+    monkeypatch.setattr("os.environ", _environment(tmp_path))
+    tokens_dir = tmp_path / "tokens"
+    tokens_dir.mkdir(parents=True, exist_ok=True)
+    (tokens_dir / "tokens.json").write_text("{not json", encoding="utf-8")
+
+    assert main(["logout"]) == EXIT_OK
+
+    assert not (tokens_dir / "tokens.json").exists()
+    assert "Restart the connector" in capsys.readouterr().err
+
+
+def test_a_command_other_than_logout_still_refuses_an_unreadable_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Everything else needs a token it cannot read — and one it cannot read is one it cannot redact.
+    monkeypatch.setattr("os.environ", _environment(tmp_path))
+    tokens_dir = tmp_path / "tokens"
+    tokens_dir.mkdir(parents=True, exist_ok=True)
+    (tokens_dir / "tokens.json").write_text("{not json", encoding="utf-8")
+
+    assert main(["sync-once"]) == EXIT_FAILED
+    assert "tokens.json" in capsys.readouterr().err
+    assert (tokens_dir / "tokens.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_ensure_webhook_reports_a_registration_pointing_at_the_old_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The migration this release requires invites exactly this: move WEBHOOK_URL to the new port, forget
+    # `webhook delete`, and Polar keeps delivering to the old address while /status looks healthy.
+    fake = _FakePolarWebhooks()
+    fake.existing = {"id": "wh-1", "events": ["EXERCISE"], "url": "http://old.test:8080/webhook", "active": True}
+    polar = TestServer(fake.app())
+    await polar.start_server()
+    try:
+        monkeypatch.setattr(
+            "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
+        )
+        config = _config(
+            tmp_path, WEBHOOK_URL="http://new.test:8081/webhook", WEBHOOK_ADDR="127.0.0.1:0", HTTP_ADDR="127.0.0.1:0"
+        )
+        tokens = TokenStore(config.tokens_dir)
+        await tokens.store_webhook(
+            StoredWebhook(webhook_id="wh-1", signature_secret_key="s3cr3t", url="http://old.test:8080/webhook")
+        )
+        status = Status(config.poll_interval, NOW, authorize_url=None)
+
+        async with aiohttp.ClientSession() as session:
+            with caplog.at_level(logging.ERROR):
+                await ensure_webhook(config, Secrets(), tokens, session, status)
+
+        assert "http://old.test:8080/webhook" in caplog.text
+        assert "webhook delete" in caplog.text
+    finally:
+        await polar.close()

@@ -75,7 +75,8 @@ ENV PATH=/opt/venv/bin:$PATH \
 
 RUN mkdir -p /watch /state /tokens
 
-EXPOSE 8080
+# 8080 is the local listener; 8081 is the conventional WEBHOOK_ADDR port, which stays closed unless set.
+EXPOSE 8080 8081
 
 # The connector answers its own healthcheck, so the image needs no curl.
 HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \

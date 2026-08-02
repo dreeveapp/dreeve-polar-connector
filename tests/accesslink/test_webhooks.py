@@ -89,6 +89,21 @@ def test_a_non_hex_signature_does_not_verify_and_does_not_raise() -> None:
     assert not signature_matches(BODY, "not-a-signature", SECRET)
 
 
+def test_a_non_ascii_signature_is_not_a_match() -> None:
+    # hmac.compare_digest raises TypeError on a non-ASCII str, and this header is attacker-controlled.
+    assert not signature_matches(BODY, "ü" * 64, SECRET)
+
+
+def test_a_signature_with_non_hex_characters_is_not_a_match() -> None:
+    assert not signature_matches(BODY, "z" * 64, SECRET)
+
+
+def test_a_signature_that_is_hex_with_a_prefix_is_not_a_match() -> None:
+    # int(value, 16) would accept both of these, which is why the check is an explicit digit test.
+    assert not signature_matches(BODY, "0x" + "a" * 62, SECRET)
+    assert not signature_matches(BODY, "a" * 31 + "_" + "a" * 32, SECRET)
+
+
 def test_an_exercise_event_is_parsed() -> None:
     event = parse_exercise_event(BODY)
 

@@ -28,7 +28,7 @@ from dreeve_polar_connector.ledger import LEDGER_FILENAME, CorruptLedger, Ledger
 from dreeve_polar_connector.logging_ import Secrets, configure_logging
 from dreeve_polar_connector.loop import AuthorizationStamp, SyncLoop, heartbeat_path
 from dreeve_polar_connector.polar import AccessLinkPolarClient, AuthorizationRequired, PolarError
-from dreeve_polar_connector.server import HttpServer, build_app
+from dreeve_polar_connector.server import HttpServer, build_local_app, build_webhook_app
 from dreeve_polar_connector.status import UNHEALTHY_AFTER_CYCLES, Status
 from dreeve_polar_connector.sync import Sync, SystemClock
 from dreeve_polar_connector.tokens import Authorization, CorruptTokenStore, StoredWebhook, TokenStore
@@ -102,6 +102,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("login", help="Authorize once from a terminal, by pasting the code from your browser.")
+    commands.add_parser(
+        "logout", help="Forget the stored authorization, so a different Polar account can be connected."
+    )
     sync_command = commands.add_parser("sync-once", help="Run a single sync cycle and exit.")
     sync_command.add_argument(
         "--dry-run",
@@ -134,11 +137,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         for value in tokens.secrets():
             secrets.add(value)
     except CorruptTokenStore as exception:
-        logger.error("%s", exception)
-        return EXIT_FAILED
+        # `logout` is the documented way out of an unreadable store, so refusing to dispatch it here
+        # would leave deleting the file by hand as the only route. Nothing else can run: every other
+        # command needs a token it cannot read, and one it cannot read is one it cannot redact either.
+        if arguments.command != "logout":
+            logger.error("%s", exception)
+            return EXIT_FAILED
+        logger.warning("%s Continuing, because clearing it is what `logout` is for.", exception)
 
     dispatch: dict[str, Command] = {
         "login": login,
+        "logout": logout,
         "sync-once": sync_once,
         "run": run,
         "healthcheck": healthcheck,
@@ -206,6 +215,39 @@ async def login(config: Config, secrets: Secrets, tokens: TokenStore, arguments:
     return EXIT_OK
 
 
+async def logout(config: Config, secrets: Secrets, tokens: TokenStore, arguments: Namespace) -> int:  # noqa: ARG001
+    """Clears the stored authorization, which is what re-opens `/authorize`.
+
+    Leaves `webhook.json` alone. That file holds a signing key Polar discloses exactly once, and losing
+    it costs a webhook re-registration that has nothing to do with changing accounts.
+
+    This runs in its own container, so it can only change the file. A running connector holds the `Sync`
+    it already built (`loop.SyncLoop._resolve_sync`) and goes on using the token it loaded, which is why
+    the message below asks for a restart rather than assuming this was enough.
+    """
+    try:
+        stored = tokens.current() is not None
+    except CorruptTokenStore as exception:
+        # Clearing an unreadable file is the whole point: it is what unblocks `/authorize`, which refuses
+        # while it cannot tell who is connected.
+        logger.warning("%s Clearing it anyway.", exception)
+        stored = True
+
+    if not stored:
+        logger.info("Nothing to do: no authorization is stored in %s.", tokens.tokens_path)
+        return EXIT_OK
+
+    tokens.clear()
+    logger.info(
+        "Cleared the stored authorization in %s. Restart the connector so it stops using the token it "
+        "already loaded, then authorize again. %s",
+        tokens.tokens_path,
+        no_authorization_instruction(config),
+    )
+
+    return EXIT_OK
+
+
 async def sync_once(config: Config, secrets: Secrets, tokens: TokenStore, arguments: Namespace) -> int:  # noqa: ARG001
     async with aiohttp.ClientSession() as session:
         try:
@@ -236,20 +278,30 @@ async def run(config: Config, secrets: Secrets, tokens: TokenStore, arguments: N
     wake = asyncio.Event()
 
     async with aiohttp.ClientSession() as session:
-        server: HttpServer | None = None
+        servers: list[HttpServer] = []
         if config.http_addr is not None:
-            server = HttpServer(
-                config.http_addr,
-                build_app(
-                    config=config,
-                    status=status,
-                    clock=clock,
-                    tokens=tokens,
-                    session=session,
-                    secrets=secrets,
-                    wake=wake,
-                ),
+            servers.append(
+                HttpServer(
+                    config.http_addr,
+                    build_local_app(
+                        config=config,
+                        status=status,
+                        clock=clock,
+                        tokens=tokens,
+                        session=session,
+                        secrets=secrets,
+                        wake=wake,
+                    ),
+                )
             )
+        if config.webhook_addr is not None:
+            servers.append(
+                HttpServer(
+                    config.webhook_addr,
+                    build_webhook_app(status=status, clock=clock, tokens=tokens, wake=wake),
+                )
+            )
+        for server in servers:
             await server.start()
 
         try:
@@ -288,7 +340,7 @@ async def run(config: Config, secrets: Secrets, tokens: TokenStore, arguments: N
 
             await loop.run()
         finally:
-            if server is not None:
+            for server in servers:
                 await server.stop()
 
     return EXIT_OK
@@ -444,6 +496,17 @@ async def ensure_webhook(
                 tokens.webhook_path,
             )
             return
+
+        if info.url and info.url != config.webhook_url:
+            # Nothing here can change a registered URL — Polar has no update call — so this is reported
+            # rather than repaired. Worth reporting loudly: `active` stays true and /status looks healthy
+            # while every delivery goes to the old address, until seven days of failures deactivate it.
+            logger.error(
+                "Polar delivers this webhook to %s, but WEBHOOK_URL is now %s, so no delivery can arrive. "
+                "Run `webhook delete`, then restart to register the new URL. Polling continues meanwhile.",
+                info.url,
+                config.webhook_url,
+            )
 
         if not info.active:
             logger.info("Polar had deactivated the webhook; activating it again")

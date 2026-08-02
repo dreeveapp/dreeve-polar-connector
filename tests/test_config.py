@@ -174,11 +174,54 @@ def test_an_out_of_range_port_is_reported() -> None:
         Config.from_env({**MINIMAL, "HTTP_ADDR": "0.0.0.0:70000"})
 
 
-def test_a_webhook_without_a_server_to_receive_it_is_reported() -> None:
-    # Polar POSTs to the connector's own HTTP server. With HTTP_ADDR off there is nothing listening,
-    # so the webhook would be registered and then fail every delivery for seven days.
-    with pytest.raises(InvalidConfiguration, match="WEBHOOK_URL"):
-        Config.from_env({**MINIMAL, "HTTP_ADDR": "off", "WEBHOOK_URL": "https://example.test/webhook"})
+def test_the_webhook_listener_is_off_unless_asked_for() -> None:
+    # A default deployment has no internet-facing surface at all.
+    assert Config.from_env(MINIMAL).webhook_addr is None
+
+
+def test_the_webhook_listener_address_is_read() -> None:
+    assert Config.from_env({**MINIMAL, "WEBHOOK_ADDR": "0.0.0.0:8081"}).webhook_addr == "0.0.0.0:8081"
+
+
+def test_a_webhook_url_without_a_webhook_listener_is_refused() -> None:
+    # Polar POSTs to this connector. With no webhook listener nothing answers, and Polar deactivates
+    # a webhook after seven days of failures.
+    with pytest.raises(InvalidConfiguration, match="WEBHOOK_ADDR"):
+        Config.from_env({**MINIMAL, "WEBHOOK_URL": "https://example.test/webhook"})
+
+
+def test_a_webhook_url_with_a_webhook_listener_is_accepted() -> None:
+    config = Config.from_env({**MINIMAL, "WEBHOOK_URL": "https://example.test/webhook", "WEBHOOK_ADDR": "0.0.0.0:8081"})
+
+    assert config.webhook_url == "https://example.test/webhook"
+    assert config.webhook_addr == "0.0.0.0:8081"
+
+
+def test_a_webhook_url_no_longer_depends_on_the_local_listener() -> None:
+    # HTTP_ADDR is the operator's listener now; it has nothing to do with Polar's deliveries.
+    config = Config.from_env(
+        {
+            **MINIMAL,
+            "HTTP_ADDR": "off",
+            "WEBHOOK_URL": "https://example.test/webhook",
+            "WEBHOOK_ADDR": "0.0.0.0:8081",
+        }
+    )
+
+    assert config.http_addr is None
+    assert config.webhook_addr == "0.0.0.0:8081"
+
+
+def test_both_listeners_off_is_legal() -> None:
+    config = Config.from_env({**MINIMAL, "HTTP_ADDR": "off"})
+
+    assert config.http_addr is None
+    assert config.webhook_addr is None
+
+
+def test_a_malformed_webhook_listener_address_is_refused() -> None:
+    with pytest.raises(InvalidConfiguration, match="WEBHOOK_ADDR"):
+        Config.from_env({**MINIMAL, "WEBHOOK_ADDR": "0.0.0.0"})
 
 
 def test_a_public_url_loses_its_trailing_slash() -> None:
@@ -236,3 +279,47 @@ def test_an_unknown_fallback_format_is_reported() -> None:
 def test_an_unknown_log_level_is_reported() -> None:
     with pytest.raises(InvalidConfiguration, match="LOG_LEVEL"):
         Config.from_env({**MINIMAL, "LOG_LEVEL": "chatty"})
+
+
+def test_two_listeners_on_the_same_address_are_refused() -> None:
+    # Reported on boot rather than left to bind(), which raises OSError from inside run() once the
+    # first listener is already up.
+    with pytest.raises(InvalidConfiguration, match="WEBHOOK_ADDR"):
+        Config.from_env({**MINIMAL, "HTTP_ADDR": "0.0.0.0:8080", "WEBHOOK_ADDR": "0.0.0.0:8080"})
+
+
+def test_a_wildcard_listener_collides_with_a_specific_one_on_the_same_port() -> None:
+    # Binding 0.0.0.0:8080 takes the port on every interface, so 127.0.0.1:8080 can no longer have it.
+    with pytest.raises(InvalidConfiguration, match="same port"):
+        Config.from_env({**MINIMAL, "HTTP_ADDR": "0.0.0.0:8080", "WEBHOOK_ADDR": "127.0.0.1:8080"})
+
+    with pytest.raises(InvalidConfiguration, match="same port"):
+        Config.from_env({**MINIMAL, "HTTP_ADDR": "127.0.0.1:8080", "WEBHOOK_ADDR": "0.0.0.0:8080"})
+
+
+def test_different_ports_are_fine() -> None:
+    config = Config.from_env({**MINIMAL, "HTTP_ADDR": "0.0.0.0:8080", "WEBHOOK_ADDR": "0.0.0.0:8081"})
+
+    assert config.http_addr == "0.0.0.0:8080"
+    assert config.webhook_addr == "0.0.0.0:8081"
+
+
+def test_two_listeners_on_specific_but_different_hosts_are_allowed() -> None:
+    # Both can bind: different interfaces, same port number.
+    config = Config.from_env({**MINIMAL, "HTTP_ADDR": "127.0.0.1:8080", "WEBHOOK_ADDR": "192.168.1.5:8080"})
+
+    assert config.webhook_addr == "192.168.1.5:8080"
+
+
+def test_port_zero_never_collides() -> None:
+    # 0 means "any free port", so two of them cannot fight over one. The end-to-end tests rely on this.
+    config = Config.from_env({**MINIMAL, "HTTP_ADDR": "127.0.0.1:0", "WEBHOOK_ADDR": "127.0.0.1:0"})
+
+    assert config.http_addr == "127.0.0.1:0"
+    assert config.webhook_addr == "127.0.0.1:0"
+
+
+def test_a_collision_is_not_reported_when_the_webhook_listener_is_off() -> None:
+    config = Config.from_env({**MINIMAL, "HTTP_ADDR": "0.0.0.0:8080"})
+
+    assert config.webhook_addr is None

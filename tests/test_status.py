@@ -145,7 +145,13 @@ def test_the_webhook_is_reported_when_registered() -> None:
 
     payload = status.to_dict(STARTED)
 
-    assert payload["webhook"] == {"configured": True, "active": True, "id": "abdf33", "lastEventAt": None}
+    assert payload["webhook"] == {
+        "configured": True,
+        "active": True,
+        "id": "abdf33",
+        "lastEventAt": None,
+        "rejectedDeliveries": 0,
+    }
 
 
 def test_the_webhook_reports_the_last_event_it_received() -> None:
@@ -162,7 +168,23 @@ def test_an_unconfigured_webhook_is_reported_as_such() -> None:
         "active": False,
         "id": None,
         "lastEventAt": None,
+        "rejectedDeliveries": 0,
     }
+
+
+def test_rejected_deliveries_start_at_zero() -> None:
+    assert _status().to_dict(STARTED)["webhook"]["rejectedDeliveries"] == 0
+
+
+def test_rejected_deliveries_are_counted() -> None:
+    # A rising count means deliveries are arriving but cannot be verified, which is the one symptom
+    # that distinguishes a signing-key problem from Polar simply being quiet.
+    status = _status()
+
+    status.delivery_rejected()
+    status.delivery_rejected()
+
+    assert status.to_dict(STARTED)["webhook"]["rejectedDeliveries"] == 2
 
 
 def test_the_rate_limit_budget_is_reported() -> None:
@@ -176,3 +198,23 @@ def test_the_rate_limit_budget_is_reported() -> None:
         "longLimit": 5100,
         "resetSeconds": 640,
     }
+
+
+def test_the_authorization_state_is_readable() -> None:
+    # The server has to branch on this, and reaching into a private attribute from another module is
+    # how that branch silently rots.
+    status = _status()
+
+    assert status.authorization_state() is AuthorizationState.REQUIRED
+
+    status.authorized(475)
+
+    assert status.authorization_state() is AuthorizationState.OK
+
+
+def test_delivery_rejected_reports_the_running_total() -> None:
+    # The server thins out its logging by this number, so it has to be the real count.
+    status = _status()
+
+    assert status.delivery_rejected() == 1
+    assert status.delivery_rejected() == 2

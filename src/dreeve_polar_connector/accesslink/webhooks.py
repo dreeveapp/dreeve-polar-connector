@@ -4,6 +4,15 @@ The receiving endpoint is unauthenticated by construction — Polar cannot send 
 HMAC is the only authentication it has. It is computed over the raw request body: re-serialising the
 JSON first changes whitespace and key order, and a correct signature would then fail.
 
+The scheme, per https://www.polar.com/accesslink-api/ : header `Polar-Webhook-Signature`, HMAC-SHA256
+over the payload, hex-encoded, keyed with the `signature_secret_key` that is disclosed exactly once
+when the webhook is created. Every payload is signed, pings included.
+
+This is Polar Electro's AccessLink API. It is *not* Polar.sh, the payments company, whose webhooks use
+Standard Webhooks — `webhook-id`/`webhook-timestamp`/`webhook-signature`, base64, a `v1,` prefix, svix
+libraries — and which dominates search results for "Polar webhook signature". Implementing that here
+would reject every genuine delivery.
+
 Registration uses client credentials (HTTP Basic), not a user token, which is why these are module
 functions rather than methods on `AccessLinkClient`.
 """
@@ -33,6 +42,7 @@ SIGNATURE_HEADER = "Polar-Webhook-Signature"
 # Polar's payloads are a few hundred bytes. A cap keeps an unauthenticated endpoint from being a
 # memory-exhaustion lever.
 MAX_BODY_BYTES = 64 * 1024
+HEX_DIGITS = frozenset("0123456789abcdef")
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +53,17 @@ def signature_for(body: bytes, secret: str) -> str:
 
 
 def signature_matches(body: bytes, signature: str, secret: str) -> bool:
-    """Constant-time comparison. Never raises: a malformed signature is simply not a match."""
-    return hmac.compare_digest(signature_for(body, secret), signature.strip().lower())
+    """Constant-time comparison. Never raises: a malformed signature is simply not a match.
+
+    Anything that is not ASCII hexadecimal is rejected before the comparison. `hmac.compare_digest`
+    raises TypeError on a non-ASCII `str`, and this value arrives in a header on an unauthenticated
+    endpoint, so letting it through would turn a crafted request into a 500.
+    """
+    candidate = signature.strip().lower()
+    if not candidate or not HEX_DIGITS.issuperset(candidate):
+        return False
+
+    return hmac.compare_digest(signature_for(body, secret), candidate)
 
 
 def parse_exercise_event(body: bytes) -> ExerciseEvent | None:

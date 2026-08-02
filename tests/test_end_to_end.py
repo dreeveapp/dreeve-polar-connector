@@ -10,16 +10,20 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from dreeve_polar_connector.accesslink.webhooks import signature_for
 from dreeve_polar_connector.cli import EXIT_OK, main
 from dreeve_polar_connector.ledger import LEDGER_FILENAME
-from dreeve_polar_connector.tokens import Authorization, TokenStore
+from dreeve_polar_connector.server import HttpServer
+from dreeve_polar_connector.tokens import Authorization, StoredWebhook, TokenStore
 
 NOW = datetime(2026, 7, 29, 8, 0, tzinfo=UTC)
 FIT_BYTES = b"\x0e\x10Q\x00.FITfake"
+SIGNING_KEY = "abe1f3ae-fd33-11e8-8eb2-f2801f1b9fd1"
 
 
 def _polar_app() -> web.Application:
@@ -142,3 +146,85 @@ async def test_run_without_an_authorization_stays_up_and_reports_the_url(
     stderr = capsys.readouterr().err
     assert "http://127.0.0.1:0/authorize" in stderr
     assert not (tmp_path / "watch").exists() or not list((tmp_path / "watch").glob("*"))
+
+
+@pytest.mark.asyncio
+async def test_a_signed_delivery_reaches_the_webhook_listener_of_a_running_connector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one property no other test covers: a genuine signed delivery, arriving on the second listener
+    of a real `run()`, against the real token store.
+
+    Everything else about the split is asserted in isolation — that the applications serve the routes they
+    should, that `run` starts both. This is the wiring between them.
+    """
+    polar = TestServer(_polar_app())
+    await polar.start_server()
+    try:
+        monkeypatch.setattr(
+            "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
+        )
+        tokens = TokenStore(tmp_path / "tokens")
+        await tokens.store(
+            Authorization(polar_user_id=475, access_token="a-token", member_id="dreeve-475", authorized_at=NOW)
+        )
+        await tokens.store_webhook(
+            StoredWebhook(webhook_id="wh-1", signature_secret_key=SIGNING_KEY, url="http://nas.local:8081/webhook")
+        )
+
+        # The bound ports are chosen by the OS, so they are read back off the servers as they start.
+        ports: list[int] = []
+        real_start = HttpServer.start
+
+        async def _record(self: HttpServer) -> None:
+            await real_start(self)
+            ports.append(self.port)
+
+        monkeypatch.setattr(HttpServer, "start", _record)
+        monkeypatch.setattr(
+            "os.environ",
+            {
+                "POLAR_CLIENT_ID": "a-client",
+                "POLAR_CLIENT_SECRET": "a-secret",
+                "WATCH_DIR": str(tmp_path / "watch"),
+                "STATE_DIR": str(tmp_path / "state"),
+                "POLAR_TOKENS": str(tmp_path / "tokens"),
+                "DOWNLOAD_DELAY_SECONDS": "0",
+                "MAX_CYCLES": "2",
+                "POLL_INTERVAL": "2",
+                "HTTP_ADDR": "127.0.0.1:0",
+                "WEBHOOK_ADDR": "127.0.0.1:0",
+            },
+        )
+
+        running = asyncio.create_task(asyncio.to_thread(main, ["run"]))
+        for _ in range(200):
+            if len(ports) == 2:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(ports) == 2, "both listeners should have started"
+        local_port, webhook_port = ports
+        assert local_port != webhook_port
+
+        body = json.dumps({"event": "EXERCISE", "user_id": 475, "entity_id": "2AC312F"}).encode("utf-8")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{webhook_port}/webhook",
+                data=body,
+                headers={
+                    "Polar-Webhook-Event": "EXERCISE",
+                    "Polar-Webhook-Signature": signature_for(body, SIGNING_KEY),
+                },
+            ) as delivery:
+                assert delivery.status == 200
+
+            # The operator's routes are not on that port, and Polar's are not on the operator's.
+            async with session.get(f"http://127.0.0.1:{webhook_port}/status") as wrong_listener:
+                assert wrong_listener.status == 404
+            async with session.post(f"http://127.0.0.1:{local_port}/webhook", data=b"{}") as wrong_port:
+                assert wrong_port.status == 404
+
+        assert await running == EXIT_OK
+    finally:
+        await polar.close()

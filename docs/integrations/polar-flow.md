@@ -51,8 +51,11 @@ Add this alongside the `app` and `daemon` services in your
       - ./polar/state:/state
       - ./polar/tokens:/tokens
     ports:
-      # Serves /authorize, /status and Polar's webhook deliveries.
+      # The local listener: /authorize, /status and the healthcheck. LAN only — never forward this.
       - '8080:8080'
+      # Uncomment only with WEBHOOK_ADDR=0.0.0.0:8081 set. This is the one port that may face the
+      # internet; it serves /webhook and nothing else.
+      # - '8081:8081'
     env_file: ./.env
 ```
 
@@ -147,7 +150,7 @@ Fetch the status by running:
 | `lastCycle.backlog` | Same as the top-level `backlog`.                                                                                     |
 | `backlog` | Exercises still owed a download, whatever cycle they were listed in. This is the number to watch during a first run. |
 | `exercises` | The whole ledger counted by state: `pending`, `delivered`, `skipped`, `failed`, `no-file`.                           |
-| `webhook` | `configured`, `active`, its `id` and `lastEventAt`. All quiet unless `WEBHOOK_URL` is set.                           |
+| `webhook` | `configured`, `active`, its `id`, `lastEventAt` and `rejectedDeliveries` — deliveries refused because they could not be verified. All quiet unless `WEBHOOK_URL` is set. |
 | `rateLimit` | What Polar last reported of your budget: `shortUsage`, `shortLimit`, `longUsage`, `longLimit`, `resetSeconds`.       |
 
 ## Configuration
@@ -171,8 +174,9 @@ Fetch the status by running:
 | `MAX_DOWNLOADS_PER_CYCLE` | `25`             | The per-cycle cap. See above. |
 | `DOWNLOAD_DELAY_SECONDS` | `1`              | Pause between downloads. |
 | `MAX_BACKOFF_SECONDS` | `21600`          | Cap on the backoff after a rate limit (6 hours). |
-| `WEBHOOK_URL` | -                | A publicly reachable HTTPS URL ending in `/webhook`. See [Instant delivery via webhook](/integrations/polar-flow.md#instant-delivery-via-webhook). |
-| `HTTP_ADDR` | `0.0.0.0:8080`   | Serves `/healthz`, `/status`, `/authorize`, `/callback` and `/webhook`. `off` disables the server, moving authorization to the `login` command and the healthcheck to a heartbeat file in `STATE_DIR`. |
+| `WEBHOOK_URL` | -                | A publicly reachable HTTPS URL ending in `/webhook`. Requires `WEBHOOK_ADDR` to be set alongside it. See [Instant delivery via webhook](/integrations/polar-flow.md#instant-delivery-via-webhook). |
+| `HTTP_ADDR` | `0.0.0.0:8080`   | The **local** listener: `/healthz`, `/status`, `/authorize`, `/callback` and `/`. Keep it on your LAN — see [Which ports are safe to publish](/integrations/polar-flow.md#which-ports-are-safe-to-publish). `off` disables it, moving authorization to the `login` command and the healthcheck to a heartbeat file in `STATE_DIR`. |
+| `WEBHOOK_ADDR` | `off`            | The **public** listener, serving `/webhook` and nothing else. Required when `WEBHOOK_URL` is set. `0.0.0.0:8081` is the conventional value. |
 | `MAX_CYCLES` | `0`              | `0` runs forever; anything else runs that many cycles and exits. |
 | `DRY_RUN` | `false`          | List what would be downloaded, download nothing, leave the ledger untouched. |
 | `LOG_LEVEL` | `info`           | `debug`, `info`, `warning`, `error` or `critical`. |
@@ -189,6 +193,10 @@ Fetch the status by running:
 ```bash
 # Authorize from a terminal, when there is no page to open. Once, interactively.
 > docker compose run --rm polar-connector login
+
+# Forget the stored authorization, so a different Polar account can connect.
+# Restart afterwards: a running container keeps using the token it already loaded.
+> docker compose run --rm polar-connector logout
 
 # Run a single cycle and exit.
 > docker compose run --rm polar-connector sync-once
@@ -211,9 +219,38 @@ Set `WEBHOOK_URL` to a publicly reachable HTTPS URL ending in `/webhook` and Pol
 connector the moment a session is uploaded, cutting latency from `POLL_INTERVAL` to seconds. It is
 registered for you on startup, and re-activated if Polar has deactivated it.
 
+Set `WEBHOOK_ADDR` as well — `/webhook` has its own listener, and it is the only port you publish.
+`HTTP_ADDR` plays no part in webhook delivery.
+
 Polling stays on regardless, so a webhook that quietly stops working costs you latency and never data.
-`HTTP_ADDR` has to stay on — Polar posts to this connector's own server, and Polar deactivates a webhook
-after seven days of failed deliveries.
+It is still worth fixing: Polar deactivates a webhook after seven days of failed deliveries.
+
+If `/status` shows `webhook.rejectedDeliveries` climbing, deliveries are arriving but cannot be
+verified: the stored signing key does not match the registered webhook. Run `webhook delete`, then
+restart to register a fresh one.
+
+One caveat before you act on that number: the port is public, so anyone who finds it can push it up by
+posting nonsense. Treat a rising count as a reason to check `webhook show` against `WEBHOOK_URL`, not as
+proof on its own. Genuine deliveries you never see is the symptom that matters, and `lastEventAt`
+standing still while you finish a session is the one to watch.
+
+## Which ports are safe to publish
+
+The connector listens on two ports, and only one of them may face the internet.
+
+| Port | Routes | Publish it? |
+|---|---|---|
+| `HTTP_ADDR` (default `8080`) | `/authorize`, `/callback`, `/status`, `/healthz`, `/` | **LAN only.** Never port-forward it, and never put it behind a public reverse proxy. |
+| `WEBHOOK_ADDR` (off by default) | `/webhook` | Yes — this is the only route Polar needs to reach. |
+
+Why it matters: anyone who can open `/authorize` can approve access with *their own* Polar account.
+The connector stores one authorization, so theirs would replace yours — your sync stops, and their
+training files are downloaded into your watch folder. The connector refuses that swap while it holds a
+working authorization, but do not rely on it alone: keep the port off the internet.
+
+`/webhook` is safe to publish because every delivery is verified with the HMAC key Polar issued at
+registration, the body is size-capped, and the only thing a valid delivery does is wake the sync loop a
+little earlier. Files are always fetched from Polar's API afterwards, never taken from a delivery.
 
 ## When something looks wrong
 
@@ -223,6 +260,23 @@ picks the new token up on its own, with no restart.
 
 **`"authorization": "required"`** means nobody has authorized yet, or the token volume was lost. Same
 fix, same URL — `authorizeUrl` in `/status` spells it out.
+
+**`409 Already connected` when opening `/authorize`** is the takeover guard: this connector already
+holds a working authorization, so it will not start a new flow. To connect a different account:
+
+```bash
+> docker compose run --rm polar-connector logout
+> docker compose restart polar-connector
+```
+
+Then open `/authorize`. The restart is required, not tidiness: a running container keeps using the
+token it already loaded, so `logout` alone changes what is on disk while the sync carries on with the
+old account — and `/status` keeps reporting the old `polarUser`.
+
+Two exceptions where `/authorize` stays open without a `logout`: `"authorization": "revoked"` and
+`"authorization": "consent-required"`. Straight after a restart the state is `"required"` for a few
+seconds even though a token is stored, because the connector has not yet tried to use it — the first
+cycle settles it, and `/authorize` opens again if the token really was revoked.
 
 **A rising `backlog` with `backoffSeconds` above `0`** is a rate limit, and it resolves itself. Check
 `rateLimit` to see how much of your budget Polar thinks you have used.

@@ -13,6 +13,9 @@ services:
   #
   # Note: env_file is read when the container is *created*, not when it starts, so changed variables
   # need `docker compose up -d --force-recreate`, not `restart`.
+  #
+  # Publishing 8080 to the internet would let anyone connect their own Polar account. Keep it on the
+  # LAN. Only the WEBHOOK_ADDR port may be published, and only when webhooks are in use.
   polar-connector:
     build:
       context: .
@@ -30,7 +33,11 @@ services:
       # Holds the access token and the webhook signing key. Back this up; do not share it.
       - ./tokens:/tokens
     ports:
+      # The local listener: /authorize, /status and the healthcheck. LAN only — never forward this.
       - '8080:8080'
+      # Uncomment only with WEBHOOK_ADDR=0.0.0.0:8081 set. This is the one port that may face the
+      # internet; it serves /webhook and nothing else.
+      # - '8081:8081'
 
   # Toolchain container: everything runs through `make dcr cmd="..."`. Not part of `up`.
   python-cli:
