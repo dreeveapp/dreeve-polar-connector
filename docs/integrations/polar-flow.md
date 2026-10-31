@@ -115,6 +115,39 @@ connector does not pretend to backfill. Two consequences worth knowing before yo
   yourself. If you have already done that, set `SINCE=now` so the connector does not deliver the same
   sessions a second time.
 
+## Weight
+
+With `WEIGHT_SYNC=true` the connector also records your body weight from Polar Flow in Dreeve, which
+uses it from that day on (for power-to-weight, for example). It is off by default, and nothing about
+the exercise sync changes when it is off.
+
+```bash
+WEIGHT_SYNC=true
+DREEVE_URL=http://dreeve:8080
+DREEVE_API_KEY=drv_...
+DREEVE_WEIGHT_UNIT=kg
+```
+
+1. In Dreeve's admin panel, go to Settings → Security and generate an **API key** (`drv_…`). The MCP key
+   (`drvm_…`) does not work here.
+2. Set `DREEVE_URL` to Dreeve's address as this container reaches it, and `DREEVE_WEIGHT_UNIT` to the
+   unit system Dreeve is set to under Appearance. Recording weights needs Dreeve v5.3.3 or newer.
+
+How it behaves:
+
+- **Only the current weight.** Polar keeps no weight history the connector can read, so it records the
+  weight you have now, and every change from then on. Older entries are a job for Dreeve's admin panel.
+- **Only real readings.** A weight Polar only has as a profile default or an estimate is never sent.
+- **Only changes.** A weight is sent when it differs from the last one Dreeve accepted, to 0.1 kg. It is
+  filed under the day it changed in Polar, in the container's time zone (`TZ`). Editing something else
+  in your Polar profile does not send it again.
+- **One weight per day.** Dreeve keeps one value per date, so a weight recorded for a day you also
+  entered by hand replaces that entry.
+- **Dreeve being down costs nothing.** The weight is sent again on the next cycle. It never fails the
+  cycle or makes the container unhealthy; `/status` reports it under `weight`.
+
+The unit must match: with `kg` set here and Dreeve on Imperial, 80 kg is stored as 80 lb.
+
 ## Why the first sync is spread out
 
 A first run is up to a month of exercises, and asking for all of them at once is the most reliable way
@@ -178,7 +211,11 @@ Fetch the status by running:
 | `HTTP_ADDR` | `0.0.0.0:8080`   | The **local** listener: `/healthz`, `/status`, `/authorize`, `/callback` and `/`. Keep it on your LAN — see [Which ports are safe to publish](/integrations/polar-flow.md#which-ports-are-safe-to-publish). `off` disables it, moving authorization to the `login` command and the healthcheck to a heartbeat file in `STATE_DIR`. |
 | `WEBHOOK_ADDR` | `off`            | The **public** listener, serving `/webhook` and nothing else. Required when `WEBHOOK_URL` is set. `0.0.0.0:8081` is the conventional value. |
 | `MAX_CYCLES` | `0`              | `0` runs forever; anything else runs that many cycles and exits. |
-| `DRY_RUN` | `false`          | List what would be downloaded, download nothing, leave the ledger untouched. |
+| `DRY_RUN` | `false`          | List what would be downloaded, download nothing, leave the ledger untouched. With weight sync on, log the weight that would be recorded and send nothing. |
+| `WEIGHT_SYNC` | `false`          | Record your Polar weight in Dreeve whenever it changes. Off unless set. See [Weight](/integrations/polar-flow.md#weight). |
+| `DREEVE_URL` | -                | Dreeve's base URL as this container reaches it, e.g. `http://dreeve:8080`. Required when `WEIGHT_SYNC` is on. |
+| `DREEVE_API_KEY` | -                | A Dreeve API key (`drv_…`, from Settings → Security in Dreeve's admin panel). Required when `WEIGHT_SYNC` is on. Also accepts `DREEVE_API_KEY_FILE`. |
+| `DREEVE_WEIGHT_UNIT` | `kg`             | `kg` or `lb`: the unit system set in Dreeve under Appearance. Dreeve reads the number in that unit, and its API does not say which one it is. |
 | `LOG_LEVEL` | `info`           | `debug`, `info`, `warning`, `error` or `critical`. |
 | `LOG_FORMAT` | `text`           | `text` or `json`. |
 | `PUID` / `PGID` | -                | Own the delivered files as this user. Set them to the same values Dreeve runs as. |
