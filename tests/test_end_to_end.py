@@ -7,7 +7,7 @@ completes on its own.
 import asyncio
 import gzip
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiohttp
@@ -26,13 +26,23 @@ FIT_BYTES = b"\x0e\x10Q\x00.FITfake"
 SIGNING_KEY = "abe1f3ae-fd33-11e8-8eb2-f2801f1b9fd1"
 
 
+def _local_start_time(hours_ago: int) -> str:
+    """A start time inside `SINCE=-30d` whenever the suite runs.
+
+    Relative to the real clock, not `NOW`: `run` resolves SINCE against the system clock, so a fixed date
+    here silently falls out of the window 30 days later and the cycle skips every exercise.
+    Naive and local, the way Polar sends it next to `start_time_utc_offset`.
+    """
+    return (datetime.now(UTC) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def _polar_app() -> web.Application:
     async def exercises(request: web.Request) -> web.Response:  # noqa: ARG001 - no query is used
         return web.json_response(
             [
                 {
                     "id": "2AC312F",
-                    "start_time": "2026-07-28T09:40:02",
+                    "start_time": _local_start_time(hours_ago=24),
                     "start_time_utc_offset": 120,
                     "sport": "RUNNING",
                     "detailed_sport_info": "RUNNING_TREADMILL",
@@ -40,7 +50,7 @@ def _polar_app() -> web.Application:
                 },
                 {
                     "id": "NOFIT01",
-                    "start_time": "2026-07-28T10:40:02",
+                    "start_time": _local_start_time(hours_ago=23),
                     "start_time_utc_offset": 120,
                     "sport": "STRENGTH_TRAINING",
                     "detailed_sport_info": "STRENGTH_TRAINING",
