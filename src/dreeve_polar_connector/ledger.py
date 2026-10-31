@@ -14,7 +14,6 @@ version-gated and adding a field to it later would mean a migration.
 import asyncio
 import json
 import logging
-import os
 from collections import Counter
 from datetime import datetime
 from enum import StrEnum
@@ -24,9 +23,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic.alias_generators import to_camel
 
+from dreeve_polar_connector.state_files import discard_interrupted_write, write_atomically
+
 LEDGER_VERSION = 1
 LEDGER_FILENAME = "ledger.json"
-TEMP_SUFFIX = ".tmp"
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ class Ledger:
 
     @classmethod
     def load(cls, path: Path) -> "Ledger":
-        cls._discard_interrupted_write(path)
+        discard_interrupted_write(path)
 
         if not path.exists():
             logger.info("No ledger at %s yet, starting with an empty one", path)
@@ -133,16 +133,6 @@ class Ledger:
         }
 
         return cls(path, contents)
-
-    @staticmethod
-    def _discard_interrupted_write(path: Path) -> None:
-        """A leftover temp file means a previous flush died mid-write; its contents are partial."""
-        temp_path = path.with_name(path.name + TEMP_SUFFIX)
-        if not temp_path.exists():
-            return
-
-        logger.warning("Discarding %s, left behind by an interrupted write", temp_path)
-        temp_path.unlink(missing_ok=True)
 
     @property
     def is_dirty(self) -> bool:
@@ -266,22 +256,8 @@ class Ledger:
         if not self._dirty:
             return
 
-        await asyncio.to_thread(self._write)
+        await asyncio.to_thread(write_atomically, self._path, json.dumps(self.to_dict(), indent=2) + "\n")
         self._dirty = False
-
-    def _write(self) -> None:
-        """Synchronous on purpose: the atomicity is in the ordering, and threads do not change it."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self._path.with_name(self._path.name + TEMP_SUFFIX)
-
-        with temp_path.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(self.to_dict(), indent=2) + "\n")
-            handle.flush()
-            # Without this the rename can land before the contents do, and a power cut leaves an
-            # empty ledger.
-            os.fsync(handle.fileno())
-
-        temp_path.replace(self._path)
 
     def to_dict(self) -> dict[str, Any]:
         payload = self._file.model_dump(by_alias=True, mode="json")
