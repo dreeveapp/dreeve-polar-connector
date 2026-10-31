@@ -48,6 +48,13 @@ class LogFormat(StrEnum):
     JSON = "json"
 
 
+class WeightUnit(StrEnum):
+    """The unit Dreeve reads a weight in: its Appearance unit system, which its API does not expose."""
+
+    KG = "kg"
+    LB = "lb"
+
+
 @dataclass(frozen=True)
 class Since:
     """The lower bound of the very first sync, either an absolute instant or an offset from "now".
@@ -92,6 +99,10 @@ class Config:
     log_level: str
     log_format: LogFormat
     dry_run: bool
+    weight_sync: bool = False
+    dreeve_url: str | None = None
+    dreeve_api_key: str | None = None
+    dreeve_weight_unit: WeightUnit = WeightUnit.KG
 
     @property
     def redirect_uri(self) -> str | None:
@@ -127,6 +138,26 @@ class Config:
                 f"0.0.0.0:8081."
             )
 
+        # Opt-in. The Dreeve settings are read either way, so they can be staged before the switch is
+        # flipped, but only required and checked once it is on.
+        weight_sync = reader.flag("WEIGHT_SYNC", default=False)
+        dreeve_url = reader.url("DREEVE_URL")
+        dreeve_api_key = reader.optional_secret("DREEVE_API_KEY")
+        if weight_sync:
+            if dreeve_url is None:
+                reader.errors.append(
+                    "WEIGHT_SYNC is on but DREEVE_URL is not set. Point it at Dreeve's base URL, "
+                    "e.g. http://dreeve:8080."
+                )
+            elif not dreeve_url.startswith(("http://", "https://")):
+                reader.errors.append(f"DREEVE_URL must start with http:// or https://, got '{dreeve_url}'.")
+            # None means unset; "" means a DREEVE_API_KEY_FILE problem that is already reported.
+            if dreeve_api_key is None:
+                reader.errors.append(
+                    "WEIGHT_SYNC is on but DREEVE_API_KEY is not set. Generate a key in Dreeve's admin "
+                    "panel under Settings, Security, or point DREEVE_API_KEY_FILE at a file containing it."
+                )
+
         config = cls(
             client_id=reader.required_secret("POLAR_CLIENT_ID"),
             client_secret=reader.required_secret("POLAR_CLIENT_SECRET"),
@@ -154,6 +185,10 @@ class Config:
             log_level=reader.log_level("LOG_LEVEL", default="info"),
             log_format=reader.choice("LOG_FORMAT", LogFormat, default=LogFormat.TEXT),
             dry_run=reader.flag("DRY_RUN", default=False),
+            weight_sync=weight_sync,
+            dreeve_url=dreeve_url,
+            dreeve_api_key=dreeve_api_key or None,
+            dreeve_weight_unit=reader.choice("DREEVE_WEIGHT_UNIT", WeightUnit, default=WeightUnit.KG),
         )
 
         if reader.errors:
@@ -205,6 +240,18 @@ class _EnvReader:
 
     def required_secret(self, key: str) -> str:
         """Supports the `_FILE` convention so credentials can come from a Docker secret."""
+        value = self.optional_secret(key)
+        if value is None:
+            self.errors.append(
+                f"{key} is required. Create a client at https://admin.polaraccesslink.com and set it, "
+                f"or point {key}_FILE at a file containing it."
+            )
+            return ""
+
+        return value
+
+    def optional_secret(self, key: str) -> str | None:
+        """None when neither `key` nor `key_FILE` is set; "" when one is set but unusable (reported)."""
         file_key = f"{key}_FILE"
         inline = self._env.get(key, "").strip()
         secret_file = self._env.get(file_key, "").strip()
@@ -225,14 +272,7 @@ class _EnvReader:
                 return ""
             return contents
 
-        if not inline:
-            self.errors.append(
-                f"{key} is required. Create a client at https://admin.polaraccesslink.com and set it, "
-                f"or point {file_key} at a file containing it."
-            )
-            return ""
-
-        return inline
+        return inline or None
 
     def url(self, key: str) -> str | None:
         """A trailing slash would produce '//callback', which will not match a registered redirect URI."""
