@@ -23,7 +23,14 @@ from dreeve_polar_connector.accesslink.exceptions import (
     UnexpectedResponse,
     WebhookAlreadyExists,
 )
-from dreeve_polar_connector.accesslink.models import CreatedWebhook, Exercise, ExerciseEvent, RateLimit, WebhookInfo
+from dreeve_polar_connector.accesslink.models import (
+    CreatedWebhook,
+    Exercise,
+    ExerciseEvent,
+    PhysicalInfo,
+    RateLimit,
+    WebhookInfo,
+)
 from dreeve_polar_connector.accesslink.oauth import Token, authorization_url, exchange_code
 
 __all__ = [
@@ -36,6 +43,7 @@ __all__ = [
     "Exercise",
     "ExerciseEvent",
     "NotFound",
+    "PhysicalInfo",
     "RateLimit",
     "RateLimited",
     "Token",

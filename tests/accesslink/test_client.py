@@ -323,3 +323,84 @@ async def test_a_rejected_registration_still_raises(polar: Factory) -> None:
 
     with pytest.raises(ConsentRequired):
         await _client(server).register_user("dreeve-475")
+
+
+PHYSICAL_INFO = {"weight": 80.4, "weight_source": "SOURCE_MEASURED", "modified": "2026-10-30T07:12:00Z"}
+
+
+@pytest.mark.asyncio
+async def test_physical_info_is_parsed(polar: Factory) -> None:
+    async def handler(request: web.Request) -> web.Response:  # noqa: ARG001 - the request is irrelevant here
+        return web.json_response(PHYSICAL_INFO)
+
+    server = await polar({("GET", "/v3/users/physical-info"): handler})
+
+    info = await _client(server).get_physical_info()
+
+    assert info is not None
+    assert info.weight == 80.4
+    assert info.weight_source == "SOURCE_MEASURED"
+
+
+@pytest.mark.asyncio
+async def test_physical_info_for_an_unknown_user_is_none_not_an_error(polar: Factory) -> None:
+    server = await polar({("GET", "/v3/users/physical-info"): _responding(404)})
+
+    assert await _client(server).get_physical_info() is None
+    assert server.count_of("GET", "/v3/users/physical-info") == 1
+
+
+@pytest.mark.asyncio
+async def test_an_empty_physical_info_body_is_none(polar: Factory) -> None:
+    async def handler(request: web.Request) -> web.Response:  # noqa: ARG001 - the request is irrelevant here
+        return web.Response(status=204)
+
+    server = await polar({("GET", "/v3/users/physical-info"): handler})
+
+    assert await _client(server).get_physical_info() is None
+
+
+@pytest.mark.asyncio
+async def test_physical_info_without_consent_raises_consent_required(polar: Factory) -> None:
+    server = await polar({("GET", "/v3/users/physical-info"): _responding(403)})
+
+    with pytest.raises(ConsentRequired):
+        await _client(server).get_physical_info()
+
+
+@pytest.mark.asyncio
+async def test_physical_info_while_rate_limited_raises_rate_limited(polar: Factory) -> None:
+    server = await polar({("GET", "/v3/users/physical-info"): _responding(429)})
+
+    with pytest.raises(RateLimited):
+        await _client(server).get_physical_info()
+
+
+@pytest.mark.asyncio
+async def test_a_list_instead_of_physical_info_fails_loudly(polar: Factory) -> None:
+    server = await polar({("GET", "/v3/users/physical-info"): _json_list([PHYSICAL_INFO])})
+
+    with pytest.raises(UnexpectedResponse, match="Expected an object"):
+        await _client(server).get_physical_info()
+
+
+@pytest.mark.asyncio
+async def test_malformed_physical_info_fails_loudly_and_suggests_the_cause(polar: Factory) -> None:
+    async def handler(request: web.Request) -> web.Response:  # noqa: ARG001 - the request is irrelevant here
+        return web.json_response({**PHYSICAL_INFO, "weight": "heavy"})
+
+    server = await polar({("GET", "/v3/users/physical-info"): handler})
+
+    with pytest.raises(UnexpectedResponse, match="the API changed"):
+        await _client(server).get_physical_info()
+
+
+@pytest.mark.asyncio
+async def test_non_json_physical_info_fails_loudly(polar: Factory) -> None:
+    async def handler(request: web.Request) -> web.Response:  # noqa: ARG001 - the request is irrelevant here
+        return web.Response(text="<html>maintenance</html>", content_type="text/html")
+
+    server = await polar({("GET", "/v3/users/physical-info"): handler})
+
+    with pytest.raises(UnexpectedResponse, match="not valid JSON"):
+        await _client(server).get_physical_info()

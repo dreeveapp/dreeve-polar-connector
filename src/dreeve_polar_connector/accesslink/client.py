@@ -1,4 +1,4 @@
-"""The user-token half of AccessLink's HTTP: exercises, their files, and user registration.
+"""The user-token half of AccessLink's HTTP: exercises, their files, physical info and user registration.
 
 Everything here funnels through `_send`, which means the retry policy exists exactly once. The
 status-to-exception mapping itself lives in `_http.py`, shared with `webhooks.py`. `tenacity` retries
@@ -20,7 +20,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from dreeve_polar_connector.accesslink import _http
 from dreeve_polar_connector.accesslink._http import error_detail, raise_for_status
 from dreeve_polar_connector.accesslink.exceptions import ConnectionFailed, ConsentRequired, UnexpectedResponse
-from dreeve_polar_connector.accesslink.models import Exercise, RateLimit
+from dreeve_polar_connector.accesslink.models import Exercise, PhysicalInfo, RateLimit
 
 GZIP_MAGIC = b"\x1f\x8b"
 RETRY_ATTEMPTS = 3
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class AccessLinkClient:
-    """The user-scoped half of AccessLink: exercises, their files, and user registration.
+    """The user-scoped half of AccessLink: exercises, their files, physical info and user registration.
 
     Webhook and OAuth calls use client credentials rather than a user token, so they live in
     `webhooks.py` and `oauth.py` instead of here.
@@ -57,6 +57,18 @@ class AccessLinkClient:
         _, body = await self._send("GET", "/v3/exercises")
 
         return _exercises_from(body)
+
+    async def get_physical_info(self) -> PhysicalInfo | None:
+        """The user's current physical information, or None when Polar has none for them.
+
+        Only ever the current state: Polar keeps no history behind this endpoint. 404 ("user not found")
+        is read as "nothing to report" rather than an error, the same as an empty body.
+        """
+        status, body = await self._send("GET", "/v3/users/physical-info", allow_status=(404,))
+        if status == 404:
+            return None
+
+        return _physical_info_from(body)
 
     async def register_user(self, member_id: str) -> bool:
         """Registers this token's user with the client. Returns False when they already were.
@@ -152,6 +164,28 @@ def _decompressed(payload: bytes) -> bytes:
         # A truncated download looks exactly like this, and the same request is worth making again —
         # so this is ConnectionFailed rather than UnexpectedResponse.
         raise ConnectionFailed(f"The TCX body was gzipped but arrived incomplete: {exception}.") from exception
+
+
+def _physical_info_from(body: bytes) -> PhysicalInfo | None:
+    """An empty body is "nothing to report", as it is for the exercise list."""
+    if not body.strip():
+        return None
+
+    try:
+        payload = json.loads(body)
+    except ValueError as exception:
+        raise UnexpectedResponse(f"Polar's physical info was not valid JSON: {exception}.") from exception
+
+    if not isinstance(payload, dict):
+        raise UnexpectedResponse(f"Expected an object of physical info, got {type(payload).__name__}.")
+
+    try:
+        return PhysicalInfo.model_validate(payload)
+    except ValidationError as exception:
+        raise UnexpectedResponse(
+            f"Polar returned physical info this connector cannot read: {exception}. "
+            f"This usually means the API changed; check for a newer connector."
+        ) from exception
 
 
 def _exercises_from(body: bytes) -> tuple[Exercise, ...]:

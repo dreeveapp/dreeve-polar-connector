@@ -7,7 +7,14 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from dreeve_polar_connector.accesslink.models import CreatedWebhook, Exercise, ExerciseEvent, RateLimit, WebhookInfo
+from dreeve_polar_connector.accesslink.models import (
+    CreatedWebhook,
+    Exercise,
+    ExerciseEvent,
+    PhysicalInfo,
+    RateLimit,
+    WebhookInfo,
+)
 
 MINIMAL_PAYLOAD = {
     "id": "2AC312F",
@@ -201,3 +208,66 @@ def test_exercise_event_reads_the_payload_polar_posts() -> None:
 def test_exercise_event_requires_the_fields_the_handler_acts_on() -> None:
     with pytest.raises(ValidationError):
         ExerciseEvent.model_validate({"event": "EXERCISE"})
+
+
+# Polar's documented example for GET /v3/users/physical-info.
+PHYSICAL_INFO_PAYLOAD = {
+    "weight": 70.5,
+    "height": 175,
+    "created": "2025-01-01T12:00:00Z",
+    "modified": "2025-01-02T12:00:00Z",
+    "birthday": "1985-09-06",
+    "gender": "MALE",
+    "maximum_heart_rate": 190,
+    "resting_heart_rate": 60,
+    "aerobic_threshold": 130,
+    "anaerobic_threshold": 160,
+    "vo2_max": 45,
+    "weight_source": "SOURCE_USER",
+    "training_background": "REGULAR",
+    "typical_day": "MOSTLY_SITTING",
+    "sleep_goal": "PT8H",
+}
+
+
+def test_physical_info_keeps_what_weight_sync_needs() -> None:
+    info = PhysicalInfo.model_validate(PHYSICAL_INFO_PAYLOAD)
+
+    assert info.weight == 70.5
+    assert info.weight_source == "SOURCE_USER"
+    assert info.created == datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    assert info.modified == datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+
+
+def test_physical_info_tolerates_missing_fields() -> None:
+    info = PhysicalInfo.model_validate({})
+
+    assert info.weight is None
+    assert info.weight_source is None
+    assert info.created is None
+    assert info.modified is None
+
+
+def test_an_unknown_weight_source_is_kept_rather_than_rejected() -> None:
+    # Polar documents two different enums for this field, so the next value must not break parsing.
+    info = PhysicalInfo.model_validate({**PHYSICAL_INFO_PAYLOAD, "weight_source": "SOURCE_SOMETHING_NEW"})
+
+    assert info.weight_source == "SOURCE_SOMETHING_NEW"
+
+
+def test_a_physical_info_timestamp_without_a_zone_is_read_as_utc() -> None:
+    # Polar's schema says date-time without promising a zone; an aware value is what every caller needs.
+    info = PhysicalInfo.model_validate({**PHYSICAL_INFO_PAYLOAD, "modified": "2025-01-02T12:00:00"})
+
+    assert info.modified == datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+
+
+def test_a_physical_info_timestamp_with_an_offset_is_moved_to_utc() -> None:
+    info = PhysicalInfo.model_validate({**PHYSICAL_INFO_PAYLOAD, "modified": "2025-01-02T14:00:00+02:00"})
+
+    assert info.modified == datetime(2025, 1, 2, 12, 0, tzinfo=UTC)
+
+
+def test_a_non_numeric_weight_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="weight"):
+        PhysicalInfo.model_validate({**PHYSICAL_INFO_PAYLOAD, "weight": "heavy"})
