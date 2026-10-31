@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from dreeve_polar_connector.config import FallbackFormat
-from dreeve_polar_connector.polar import Exercise, RateLimitSnapshot
+from dreeve_polar_connector.polar import BodyWeight, Exercise, RateLimitSnapshot
 
 FIT_BYTES = b"fit bytes"
 TCX_BYTES = b"<TrainingCenterDatabase/>"
@@ -35,7 +35,8 @@ class StubPolar:
     """Scripted responses plus a log of what was asked for.
 
     `fit_errors` and `fallback_errors` map an exercise id to an exception to raise instead of returning
-    bytes, which is how every failure branch in `sync.py` gets exercised.
+    bytes, which is how every failure branch in `sync.py` gets exercised. `weight` is what
+    `current_weight` returns, unless `weight_error` is set.
     """
 
     def __init__(
@@ -45,11 +46,16 @@ class StubPolar:
         list_error: Exception | None = None,
         fit_errors: dict[str, Exception] | None = None,
         fallback_errors: dict[str, Exception] | None = None,
+        weight: BodyWeight | None = None,
+        weight_error: Exception | None = None,
     ) -> None:
         self.exercises = list(exercises)
         self.list_error = list_error
         self.fit_errors = fit_errors or {}
         self.fallback_errors = fallback_errors or {}
+        self.weight = weight
+        self.weight_error = weight_error
+        self.weight_requests = 0
         self.listed = 0
         self.fit_requests: list[str] = []
         self.fallback_requests: list[tuple[str, FallbackFormat]] = []
@@ -84,6 +90,13 @@ class StubPolar:
             raise error
 
         return TCX_BYTES if fallback is FallbackFormat.TCX else GPX_BYTES
+
+    async def current_weight(self) -> BodyWeight | None:
+        self.weight_requests += 1
+        if self.weight_error is not None:
+            raise self.weight_error
+
+        return self.weight
 
     def current_rate_limit(self) -> RateLimitSnapshot:
         short_usage, short_limit, long_usage, long_limit, reset_seconds = self.rate_limit

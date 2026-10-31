@@ -7,12 +7,13 @@ import pytest
 
 from dreeve_polar_connector.accesslink.exceptions import AccessLinkError
 from dreeve_polar_connector.accesslink.models import Exercise as WireExercise
-from dreeve_polar_connector.accesslink.models import RateLimit
+from dreeve_polar_connector.accesslink.models import PhysicalInfo, RateLimit
 from dreeve_polar_connector.config import FallbackFormat
 from dreeve_polar_connector.polar import (
     AccessLinkPolarClient,
     AuthenticationFailed,
     AuthorizationRequired,
+    BodyWeight,
     Exercise,
     PolarClient,
     PolarError,
@@ -69,11 +70,15 @@ def test_an_exercise_without_a_detailed_sport_still_matches_on_the_coarse_one() 
 
 
 class _FakeAccessLink:
-    """Only the three calls the adapter uses, so the protocol is what is being tested."""
+    """Only the calls the adapter uses, so the protocol is what is being tested."""
 
     def __init__(self) -> None:
         self.downloaded: list[tuple[str, str]] = []
         self.rate_limit = RateLimit()
+        self.physical_info: PhysicalInfo | None = None
+
+    async def get_physical_info(self) -> PhysicalInfo | None:
+        return self.physical_info
 
     async def list_exercises(self) -> tuple[WireExercise, ...]:
         return (
@@ -166,3 +171,65 @@ def test_the_rate_limit_crosses_the_seam_as_a_domain_snapshot() -> None:
 
 def test_an_unknown_rate_limit_is_an_empty_snapshot() -> None:
     assert AccessLinkPolarClient(_FakeAccessLink()).current_rate_limit() == RateLimitSnapshot()  # type: ignore[arg-type]
+
+
+MODIFIED = datetime(2026, 10, 30, 7, 12, tzinfo=UTC)
+CREATED = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+
+
+async def _current_weight(**physical_info: object) -> BodyWeight | None:
+    fake = _FakeAccessLink()
+    fake.physical_info = PhysicalInfo.model_validate(physical_info)
+
+    return await AccessLinkPolarClient(fake).current_weight()  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_physical_info_becomes_a_body_weight_dated_by_its_last_change() -> None:
+    weight = await _current_weight(
+        weight=80.4, weight_source="SOURCE_MEASURED", created=CREATED.isoformat(), modified=MODIFIED.isoformat()
+    )
+
+    assert weight == BodyWeight(kilograms=80.4, source="SOURCE_MEASURED", effective_at=MODIFIED)
+
+
+@pytest.mark.asyncio
+async def test_a_weight_without_a_modified_time_is_dated_by_its_creation() -> None:
+    weight = await _current_weight(weight=80.4, weight_source="SOURCE_USER", created=CREATED.isoformat())
+
+    assert weight is not None
+    assert weight.effective_at == CREATED
+
+
+@pytest.mark.asyncio
+async def test_a_weight_with_no_timestamp_at_all_is_no_weight() -> None:
+    # Without a date there is nothing to file it under in Dreeve.
+    assert await _current_weight(weight=80.4, weight_source="SOURCE_USER") is None
+
+
+@pytest.mark.asyncio
+async def test_no_physical_info_is_no_weight() -> None:
+    assert await AccessLinkPolarClient(_FakeAccessLink()).current_weight() is None  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, 0, -1.5])
+async def test_a_missing_or_impossible_weight_is_no_weight(value: float | None) -> None:
+    assert await _current_weight(weight=value, weight_source="SOURCE_USER", modified=MODIFIED.isoformat()) is None
+
+
+@pytest.mark.asyncio
+async def test_the_weight_source_crosses_the_seam_verbatim_even_when_it_is_not_a_measurement() -> None:
+    # Which sources count is weight sync's policy, not the adapter's.
+    weight = await _current_weight(weight=70.0, weight_source="SOURCE_DEFAULT", modified=MODIFIED.isoformat())
+
+    assert weight is not None
+    assert weight.source == "SOURCE_DEFAULT"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_weight_source_is_an_empty_string() -> None:
+    weight = await _current_weight(weight=70.0, modified=MODIFIED.isoformat())
+
+    assert weight is not None
+    assert weight.source == ""
