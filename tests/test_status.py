@@ -1,11 +1,13 @@
 """Health and the authorization report. The `authorizeUrl` field is the whole point of this module: the
 answer to "why is nothing arriving?" should be one line of /status, not a documentation search."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
+from dreeve_polar_connector.config import WeightUnit
 from dreeve_polar_connector.ledger import ExerciseStatus
 from dreeve_polar_connector.status import UNHEALTHY_AFTER_CYCLES, AuthorizationState, Status
 from dreeve_polar_connector.sync import CycleResult
+from dreeve_polar_connector.weight import WeightOutcome, WeightResult
 
 STARTED = datetime(2026, 7, 29, 8, 0, tzinfo=UTC)
 POLL_INTERVAL = 900
@@ -218,3 +220,78 @@ def test_delivery_rejected_reports_the_running_total() -> None:
 
     assert status.delivery_rejected() == 1
     assert status.delivery_rejected() == 2
+
+
+PUSHED = WeightResult(WeightOutcome.PUSHED, on=date(2026, 10, 30), value=80.4)
+
+
+def _weighing_status() -> Status:
+    status = Status(poll_interval=POLL_INTERVAL, started_at=STARTED, authorize_url=None, weight_unit=WeightUnit.KG)
+    status.authorized(475)
+    return status
+
+
+def test_weight_is_not_mentioned_while_weight_sync_is_off() -> None:
+    assert "weight" not in _status().to_dict(STARTED)
+
+
+def test_weight_sync_is_reported_before_its_first_cycle() -> None:
+    assert _weighing_status().to_dict(STARTED)["weight"] == {
+        "unit": "kg",
+        "lastOutcome": None,
+        "lastRecordedOn": None,
+        "lastRecordedValue": None,
+        "lastError": None,
+    }
+
+
+def test_a_recorded_weight_is_reported() -> None:
+    status = _weighing_status()
+    status.cycle_succeeded(CycleResult(weight=PUSHED), {}, STARTED)
+
+    weight = status.to_dict(STARTED)["weight"]
+
+    assert weight["lastOutcome"] == "pushed"
+    assert weight["lastRecordedOn"] == "2026-10-30"
+    assert weight["lastRecordedValue"] == 80.4
+
+
+def test_an_unchanged_weight_still_says_what_dreeve_has() -> None:
+    # After a restart nothing is pushed until the weight changes; /status should not go blank meanwhile.
+    status = _weighing_status()
+    status.cycle_succeeded(
+        CycleResult(weight=WeightResult(WeightOutcome.UNCHANGED, on=date(2026, 10, 30), value=80.4)), {}, STARTED
+    )
+
+    assert status.to_dict(STARTED)["weight"]["lastRecordedOn"] == "2026-10-30"
+
+
+def test_a_failed_weight_keeps_the_last_recorded_one_and_reports_the_error() -> None:
+    status = _weighing_status()
+    status.cycle_succeeded(CycleResult(weight=PUSHED), {}, STARTED)
+    status.cycle_succeeded(CycleResult(weight=WeightResult(WeightOutcome.FAILED, error="Dreeve is down")), {}, STARTED)
+
+    weight = status.to_dict(STARTED)["weight"]
+
+    assert weight["lastOutcome"] == "failed"
+    assert weight["lastError"] == "Dreeve is down"
+    assert weight["lastRecordedOn"] == "2026-10-30"
+
+
+def test_a_failed_weight_is_neither_the_connectors_error_nor_its_health() -> None:
+    # Exercise sync is what healthy means; Docker must not restart a connector that is delivering fine.
+    status = _weighing_status()
+    status.cycle_succeeded(CycleResult(weight=WeightResult(WeightOutcome.FAILED, error="Dreeve is down")), {}, STARTED)
+
+    report = status.to_dict(STARTED)
+
+    assert report["lastError"] is None
+    assert report["healthy"] is True
+
+
+def test_the_weight_error_clears_once_a_weight_is_recorded() -> None:
+    status = _weighing_status()
+    status.cycle_succeeded(CycleResult(weight=WeightResult(WeightOutcome.FAILED, error="Dreeve is down")), {}, STARTED)
+    status.cycle_succeeded(CycleResult(weight=PUSHED), {}, STARTED)
+
+    assert status.to_dict(STARTED)["weight"]["lastError"] is None

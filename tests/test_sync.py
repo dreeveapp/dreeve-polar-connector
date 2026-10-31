@@ -1,16 +1,18 @@
 """Every failure branch gets its own test, because each one means something different to the daemon and
 mixing them up is how activities get lost or an account gets blocked."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from dreeve_polar_connector.config import Config, FallbackFormat
 from dreeve_polar_connector.delivery import WatchFolder
+from dreeve_polar_connector.dreeve import DreeveUnreachable
 from dreeve_polar_connector.ledger import LEDGER_FILENAME, ExerciseStatus, Ledger
 from dreeve_polar_connector.polar import (
     AuthenticationFailed,
+    BodyWeight,
     ConnectionFailed,
     ConsentRequired,
     NotFound,
@@ -18,6 +20,8 @@ from dreeve_polar_connector.polar import (
     UnexpectedResponse,
 )
 from dreeve_polar_connector.sync import Sync
+from dreeve_polar_connector.weight import WeightOutcome, WeightSync
+from dreeve_polar_connector.weight_state import WEIGHT_STATE_FILENAME, WeightState
 from tests.stubs import FIT_BYTES, TCX_BYTES, StubClock, StubPolar, exercise
 
 POLAR_USER = 475
@@ -386,3 +390,104 @@ async def _prepared(tmp_path: Path, client: StubPolar, **overrides: str) -> Sync
     await sync.watch_folder_ready()
 
     return sync
+
+
+WEIGHT = BodyWeight(kilograms=80.4, source="SOURCE_MEASURED", effective_at=datetime(2026, 7, 28, 6, 0, tzinfo=UTC))
+WEIGHT_ENV = {"WEIGHT_SYNC": "true", "DREEVE_URL": "http://dreeve:8080", "DREEVE_API_KEY": "drv_key"}
+
+
+class RecordingDreeve:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.recorded: list[tuple[date, float]] = []
+
+    async def record_weight(self, on: date, weight: float) -> None:
+        if self.error is not None:
+            raise self.error
+        self.recorded.append((on, weight))
+
+
+def _weighing_sync(tmp_path: Path, client: StubPolar, dreeve: RecordingDreeve, **overrides: str) -> Sync:
+    config = _config(tmp_path, **WEIGHT_ENV, **overrides)
+
+    return Sync(
+        config=config,
+        ledger=Ledger.load(config.state_dir / LEDGER_FILENAME),
+        client=client,
+        watch_folder=WatchFolder(config.watch_dir, config.on_conflict),
+        polar_user_id=POLAR_USER,
+        clock=StubClock(NOW),
+        weight_sync=WeightSync(
+            config=config,
+            polar=client,
+            dreeve=dreeve,
+            state=WeightState.load(config.state_dir / WEIGHT_STATE_FILENAME),
+            zone=UTC,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_weight_sync_polar_is_never_asked_for_a_weight(tmp_path: Path) -> None:
+    client = StubPolar([exercise()], weight=WEIGHT)
+    sync = _sync(tmp_path, client)
+    await sync.watch_folder_ready()
+
+    result = await sync.run_once()
+
+    assert result.weight is None
+    assert client.weight_requests == 0
+    assert "weight" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_records_the_weight_after_the_exercises(tmp_path: Path) -> None:
+    dreeve = RecordingDreeve()
+    sync = _weighing_sync(tmp_path, StubPolar([exercise()], weight=WEIGHT), dreeve)
+    await sync.watch_folder_ready()
+
+    result = await sync.run_once()
+
+    assert result.delivered == 1
+    assert result.weight is not None
+    assert result.weight.outcome is WeightOutcome.PUSHED
+    assert dreeve.recorded == [(date(2026, 7, 28), 80.4)]
+    assert str(result).endswith("weight pushed")
+
+
+@pytest.mark.asyncio
+async def test_a_weight_that_dreeve_refuses_does_not_fail_the_cycle(tmp_path: Path) -> None:
+    sync = _weighing_sync(tmp_path, StubPolar([exercise()], weight=WEIGHT), RecordingDreeve(DreeveUnreachable("down")))
+    await sync.watch_folder_ready()
+
+    result = await sync.run_once()
+
+    assert result.delivered == 1
+    assert result.weight is not None
+    assert result.weight.outcome is WeightOutcome.FAILED
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_on_the_weight_keeps_what_the_cycle_delivered(tmp_path: Path) -> None:
+    sync = _weighing_sync(tmp_path, StubPolar([exercise()], weight_error=RateLimited("slow down")), RecordingDreeve())
+    await sync.watch_folder_ready()
+
+    with pytest.raises(RateLimited):
+        await sync.run_once()
+
+    ledger = Ledger.load(tmp_path / "state" / LEDGER_FILENAME)
+    entry = ledger.entry("2AC312F")
+    assert entry is not None
+    assert entry.status is ExerciseStatus.DELIVERED
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_still_reports_the_weight_it_would_record(tmp_path: Path) -> None:
+    dreeve = RecordingDreeve()
+    sync = _weighing_sync(tmp_path, StubPolar([exercise()], weight=WEIGHT), dreeve, DRY_RUN="true")
+
+    result = await sync.run_once()
+
+    assert result.weight is not None
+    assert result.weight.outcome is WeightOutcome.DRY_RUN
+    assert dreeve.recorded == []

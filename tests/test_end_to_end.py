@@ -20,6 +20,7 @@ from dreeve_polar_connector.cli import EXIT_OK, main
 from dreeve_polar_connector.ledger import LEDGER_FILENAME
 from dreeve_polar_connector.server import HttpServer
 from dreeve_polar_connector.tokens import Authorization, StoredWebhook, TokenStore
+from dreeve_polar_connector.weight_state import WEIGHT_STATE_FILENAME
 
 NOW = datetime(2026, 7, 29, 8, 0, tzinfo=UTC)
 FIT_BYTES = b"\x0e\x10Q\x00.FITfake"
@@ -36,7 +37,11 @@ def _local_start_time(hours_ago: int) -> str:
     return (datetime.now(UTC) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _polar_app() -> web.Application:
+def _polar_app(physical_info: dict[str, object] | None = None) -> web.Application:
+    """`physical_info` is what /v3/users/physical-info answers; None answers 404, as for an unknown user.
+
+    A dict rather than a value so a test can change the weight between runs."""
+
     async def exercises(request: web.Request) -> web.Response:  # noqa: ARG001 - no query is used
         return web.json_response(
             [
@@ -71,7 +76,13 @@ def _polar_app() -> web.Application:
             body=gzip.compress(b"<TrainingCenterDatabase/>"), content_type="application/vnd.garmin.tcx+xml"
         )
 
+    async def physical(request: web.Request) -> web.Response:  # noqa: ARG001 - no query is used
+        if physical_info is None:
+            return web.Response(status=404, text="{}", content_type="application/json")
+        return web.json_response(physical_info)
+
     app = web.Application()
+    app.router.add_get("/v3/users/physical-info", physical)
     app.router.add_get("/v3/exercises", exercises)
     app.router.add_get("/v3/exercises/{exercise_id}/fit", fit)
     app.router.add_get("/v3/exercises/{exercise_id}/tcx", tcx)
@@ -238,3 +249,74 @@ async def test_a_signed_delivery_reaches_the_webhook_listener_of_a_running_conne
         assert await running == EXIT_OK
     finally:
         await polar.close()
+
+
+DREEVE_KEY = "drv_end-to-end-key"
+
+
+@pytest.mark.asyncio
+async def test_weight_changes_reach_dreeve_once_each(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    physical_info: dict[str, object] = {
+        "weight": 80.4,
+        "weight_source": "SOURCE_MEASURED",
+        "modified": "2026-10-30T07:12:00Z",
+    }
+    recorded: list[tuple[str | None, dict[str, object]]] = []
+
+    async def weights(request: web.Request) -> web.Response:
+        body = await request.json()
+        recorded.append((request.headers.get("Authorization"), body))
+        return web.json_response(body)
+
+    dreeve_app = web.Application()
+    dreeve_app.router.add_post("/api/v1/athlete/weights", weights)
+
+    polar = TestServer(_polar_app(physical_info))
+    dreeve = TestServer(dreeve_app)
+    await polar.start_server()
+    await dreeve.start_server()
+    try:
+        monkeypatch.setattr(
+            "dreeve_polar_connector.accesslink._http.ACCESSLINK_BASE_URL", f"http://127.0.0.1:{polar.port}"
+        )
+        tokens = TokenStore(tmp_path / "tokens")
+        await tokens.store(
+            Authorization(polar_user_id=475, access_token="a-token", member_id="dreeve-475", authorized_at=NOW)
+        )
+        monkeypatch.setattr(
+            "os.environ",
+            {
+                "POLAR_CLIENT_ID": "a-client",
+                "POLAR_CLIENT_SECRET": "a-secret",
+                "WATCH_DIR": str(tmp_path / "watch"),
+                "STATE_DIR": str(tmp_path / "state"),
+                "POLAR_TOKENS": str(tmp_path / "tokens"),
+                "DOWNLOAD_DELAY_SECONDS": "0",
+                "MAX_CYCLES": "1",
+                "HTTP_ADDR": "127.0.0.1:0",
+                "WEIGHT_SYNC": "true",
+                "DREEVE_URL": f"http://127.0.0.1:{dreeve.port}",
+                "DREEVE_API_KEY": DREEVE_KEY,
+            },
+        )
+
+        # First run: recorded. Second: unchanged, nothing sent. Third: a new weight, recorded again.
+        assert await asyncio.to_thread(main, ["run"]) == EXIT_OK
+        assert await asyncio.to_thread(main, ["run"]) == EXIT_OK
+        physical_info.update(weight=79.8, modified="2026-11-06T06:30:00Z")
+        assert await asyncio.to_thread(main, ["run"]) == EXIT_OK
+
+        assert recorded == [
+            (f"Bearer {DREEVE_KEY}", {"weight": 80.4, "on": "2026-10-30"}),
+            (f"Bearer {DREEVE_KEY}", {"weight": 79.8, "on": "2026-11-06"}),
+        ]
+        state = json.loads((tmp_path / "state" / WEIGHT_STATE_FILENAME).read_text(encoding="utf-8"))
+        assert state["lastPushed"]["kilograms"] == 79.8
+        # Exercise sync ran alongside, untouched.
+        assert (tmp_path / "watch" / "2AC312F.fit").read_bytes() == FIT_BYTES
+        assert DREEVE_KEY not in capsys.readouterr().err
+    finally:
+        await polar.close()
+        await dreeve.close()
