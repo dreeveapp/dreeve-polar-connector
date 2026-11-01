@@ -12,6 +12,7 @@ from dreeve_polar_connector.config import (
     FallbackFormat,
     InvalidConfiguration,
     LogFormat,
+    WeightUnit,
 )
 
 MINIMAL = {"POLAR_CLIENT_ID": "a-client", "POLAR_CLIENT_SECRET": "a-secret"}
@@ -323,3 +324,84 @@ def test_a_collision_is_not_reported_when_the_webhook_listener_is_off() -> None:
     config = Config.from_env({**MINIMAL, "HTTP_ADDR": "0.0.0.0:8080"})
 
     assert config.webhook_addr is None
+
+
+WEIGHT = {**MINIMAL, "WEIGHT_SYNC": "true", "DREEVE_URL": "http://dreeve:8080", "DREEVE_API_KEY": "drv_key"}
+
+
+def test_weight_sync_is_off_by_default() -> None:
+    config = Config.from_env(MINIMAL)
+
+    assert config.weight_sync is False
+    assert config.dreeve_url is None
+    assert config.dreeve_api_key is None
+    assert config.dreeve_weight_unit is WeightUnit.KG
+
+
+def test_weight_sync_reads_its_settings() -> None:
+    config = Config.from_env({**WEIGHT, "DREEVE_URL": "http://dreeve:8080/", "DREEVE_WEIGHT_UNIT": "LB"})
+
+    assert config.weight_sync is True
+    assert config.dreeve_url == "http://dreeve:8080"
+    assert config.dreeve_api_key == "drv_key"
+    assert config.dreeve_weight_unit is WeightUnit.LB
+
+
+def test_weight_sync_without_a_dreeve_url_is_refused() -> None:
+    with pytest.raises(InvalidConfiguration, match="DREEVE_URL") as raised:
+        Config.from_env({key: value for key, value in WEIGHT.items() if key != "DREEVE_URL"})
+
+    assert "DREEVE_API_KEY" not in str(raised.value)
+
+
+def test_weight_sync_without_an_api_key_is_refused() -> None:
+    with pytest.raises(InvalidConfiguration, match="DREEVE_API_KEY") as raised:
+        Config.from_env({key: value for key, value in WEIGHT.items() if key != "DREEVE_API_KEY"})
+
+    assert "DREEVE_URL" not in str(raised.value)
+
+
+def test_a_dreeve_url_that_is_not_http_is_refused() -> None:
+    with pytest.raises(InvalidConfiguration, match="DREEVE_URL"):
+        Config.from_env({**WEIGHT, "DREEVE_URL": "dreeve:8080"})
+
+
+def test_the_dreeve_api_key_can_come_from_a_file(tmp_path: Path) -> None:
+    key_file = tmp_path / "dreeve-key"
+    key_file.write_text("drv_from_file\n", encoding="utf-8")
+    environment = {key: value for key, value in WEIGHT.items() if key != "DREEVE_API_KEY"}
+
+    config = Config.from_env({**environment, "DREEVE_API_KEY_FILE": str(key_file)})
+
+    assert config.dreeve_api_key == "drv_from_file"
+
+
+def test_an_unreadable_dreeve_api_key_file_is_reported_once() -> None:
+    environment = {key: value for key, value in WEIGHT.items() if key != "DREEVE_API_KEY"}
+
+    with pytest.raises(InvalidConfiguration) as raised:
+        Config.from_env({**environment, "DREEVE_API_KEY_FILE": "/nonexistent/dreeve-key"})
+
+    # The unreadable file is the problem; "DREEVE_API_KEY is not set" on top of it would mislead.
+    about_the_key = [error for error in raised.value.errors if "DREEVE_API_KEY" in error]
+    assert len(about_the_key) == 1
+    assert "DREEVE_API_KEY_FILE" in about_the_key[0]
+
+
+def test_an_unknown_weight_unit_is_refused() -> None:
+    with pytest.raises(InvalidConfiguration, match="DREEVE_WEIGHT_UNIT"):
+        Config.from_env({**WEIGHT, "DREEVE_WEIGHT_UNIT": "stone"})
+
+
+def test_dreeve_settings_without_weight_sync_are_accepted() -> None:
+    # Lets an operator stage the settings before switching the feature on.
+    config = Config.from_env({**MINIMAL, "DREEVE_URL": "http://dreeve:8080", "DREEVE_API_KEY": "drv_key"})
+
+    assert config.weight_sync is False
+    assert config.dreeve_url == "http://dreeve:8080"
+
+
+def test_an_invalid_dreeve_url_is_ignored_while_weight_sync_is_off() -> None:
+    config = Config.from_env({**MINIMAL, "DREEVE_URL": "dreeve:8080"})
+
+    assert config.weight_sync is False

@@ -9,12 +9,14 @@ in here is ever touched concurrently — including `delivery_rejected`, which is
 listener while `to_dict` is served from the local one.
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from dreeve_polar_connector.config import WeightUnit
 from dreeve_polar_connector.ledger import ExerciseStatus
 from dreeve_polar_connector.sync import CycleResult
+from dreeve_polar_connector.weight import WeightOutcome, WeightResult
 
 HEARTBEAT_FILENAME = "heartbeat"
 # Three intervals without a completed cycle: one missed cycle is noise, three is a problem.
@@ -31,7 +33,13 @@ class AuthorizationState(StrEnum):
 class Status:
     """Written by the loop and both listeners, read by `/status`. Same event loop throughout."""
 
-    def __init__(self, poll_interval: int, started_at: datetime, authorize_url: str | None) -> None:
+    def __init__(
+        self,
+        poll_interval: int,
+        started_at: datetime,
+        authorize_url: str | None,
+        weight_unit: WeightUnit | None = None,
+    ) -> None:
         self._poll_interval = poll_interval
         self._started_at = started_at
         self._authorize_url = authorize_url
@@ -51,6 +59,11 @@ class Status:
         self._webhook_last_event: datetime | None = None
         self._rejected_deliveries = 0
         self._rate_limit: dict[str, int | None] | None = None
+        # None means weight sync is off, and `/status` then says nothing about weight at all.
+        self._weight_unit = weight_unit
+        self._weight: WeightResult | None = None
+        self._weight_on: date | None = None
+        self._weight_value: float | None = None
 
     def authorized(self, polar_user: int) -> None:
         self._authorization = AuthorizationState.OK
@@ -77,6 +90,17 @@ class Status:
         self._counts = counts
         self._backoff_seconds = 0.0
         self._last_error = None
+        if result.weight is not None:
+            self._weight_seen(result.weight)
+
+    def _weight_seen(self, result: WeightResult) -> None:
+        """Kept apart from `_last_error` and from health: exercise sync is what healthy means, and a
+        Dreeve that is down must not make Docker restart a connector that is delivering fine."""
+        self._weight = result
+        # UNCHANGED carries what Dreeve already has, so this is filled in after a restart too.
+        if result.outcome in (WeightOutcome.PUSHED, WeightOutcome.UNCHANGED):
+            self._weight_on = result.on
+            self._weight_value = result.value
 
     def cycle_failed(self, message: str) -> None:
         self._cycles += 1
@@ -172,6 +196,20 @@ class Status:
                 "rejectedDeliveries": self._rejected_deliveries,
             },
             "rateLimit": self._rate_limit,
+        } | self._weight_dict()
+
+    def _weight_dict(self) -> dict[str, Any]:
+        if self._weight_unit is None:
+            return {}
+
+        return {
+            "weight": {
+                "unit": self._weight_unit.value,
+                "lastOutcome": self._weight.outcome.value if self._weight else None,
+                "lastRecordedOn": self._weight_on.isoformat() if self._weight_on else None,
+                "lastRecordedValue": self._weight_value,
+                "lastError": self._weight.error if self._weight else None,
+            }
         }
 
 

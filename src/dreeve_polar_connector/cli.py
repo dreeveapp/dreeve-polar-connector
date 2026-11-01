@@ -24,6 +24,7 @@ from dreeve_polar_connector.accesslink.client import AccessLinkClient
 from dreeve_polar_connector.accesslink.exceptions import AccessLinkError, WebhookAlreadyExists
 from dreeve_polar_connector.config import Config, InvalidConfiguration
 from dreeve_polar_connector.delivery import WatchFolder, WatchFolderUnusable
+from dreeve_polar_connector.dreeve import DreeveClient
 from dreeve_polar_connector.ledger import LEDGER_FILENAME, CorruptLedger, Ledger
 from dreeve_polar_connector.logging_ import Secrets, configure_logging
 from dreeve_polar_connector.loop import AuthorizationStamp, SyncLoop, heartbeat_path
@@ -32,6 +33,8 @@ from dreeve_polar_connector.server import HttpServer, build_local_app, build_web
 from dreeve_polar_connector.status import UNHEALTHY_AFTER_CYCLES, Status
 from dreeve_polar_connector.sync import Sync, SystemClock
 from dreeve_polar_connector.tokens import Authorization, CorruptTokenStore, StoredWebhook, TokenStore
+from dreeve_polar_connector.weight import WeightSync
+from dreeve_polar_connector.weight_state import WEIGHT_STATE_FILENAME, WeightState
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -129,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if getattr(arguments, "dry_run", False):
         config = replace(config, dry_run=True)
 
-    secrets = Secrets([config.client_secret])
+    secrets = Secrets([config.client_secret, config.dreeve_api_key])
     configure_logging(config.log_level, config.log_format, secrets)
 
     tokens = TokenStore(config.tokens_dir)
@@ -274,7 +277,12 @@ async def run(config: Config, secrets: Secrets, tokens: TokenStore, arguments: N
         logger.error("Cannot start. %s", exception)
         return EXIT_FAILED
 
-    status = Status(config.poll_interval, clock.now(), authorize_url=authorize_url_for(config))
+    status = Status(
+        config.poll_interval,
+        clock.now(),
+        authorize_url=authorize_url_for(config),
+        weight_unit=config.dreeve_weight_unit if config.weight_sync else None,
+    )
     wake = asyncio.Event()
 
     async with aiohttp.ClientSession() as session:
@@ -335,6 +343,12 @@ async def run(config: Config, secrets: Secrets, tokens: TokenStore, arguments: N
                     logger.warning("Could not install a handler for %s: %s", received.name, exception)
 
             logger.info("Watching Polar every %d seconds; delivering into %s", config.poll_interval, config.watch_dir)
+            if config.weight_sync:
+                logger.info(
+                    "Recording weight changes in Dreeve at %s, in %s",
+                    config.dreeve_url,
+                    config.dreeve_weight_unit.value,
+                )
             if tokens.current() is None:
                 logger.warning("%s", no_authorization_instruction(config))
 
@@ -539,14 +553,30 @@ async def build_sync(
     watch_folder = WatchFolder(config.watch_dir, config.on_conflict)
     await watch_folder.prepare()
 
+    client = AccessLinkPolarClient(AccessLinkClient(session, authorization.access_token))
+
     return Sync(
         config=config,
         ledger=Ledger.load(config.state_dir / LEDGER_FILENAME),
-        client=AccessLinkPolarClient(AccessLinkClient(session, authorization.access_token)),
+        client=client,
         watch_folder=watch_folder,
         polar_user_id=authorization.polar_user_id,
         clock=SystemClock(),
         should_stop=should_stop,
+        weight_sync=_weight_sync(config, client, session),
+    )
+
+
+def _weight_sync(config: Config, client: AccessLinkPolarClient, session: aiohttp.ClientSession) -> WeightSync | None:
+    # `Config.from_env` refuses WEIGHT_SYNC without both; checked again here only so mypy sees str, not None.
+    if not config.weight_sync or config.dreeve_url is None or config.dreeve_api_key is None:
+        return None
+
+    return WeightSync(
+        config=config,
+        polar=client,
+        dreeve=DreeveClient(session, config.dreeve_url, config.dreeve_api_key),
+        state=WeightState.load(config.state_dir / WEIGHT_STATE_FILENAME),
     )
 
 

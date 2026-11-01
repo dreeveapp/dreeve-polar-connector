@@ -26,6 +26,7 @@ from dreeve_polar_connector.accesslink.exceptions import (
     UnexpectedResponse,
 )
 from dreeve_polar_connector.accesslink.models import Exercise as WireExercise
+from dreeve_polar_connector.accesslink.models import PhysicalInfo
 from dreeve_polar_connector.accesslink.models import RateLimit as WireRateLimit
 from dreeve_polar_connector.config import FallbackFormat
 
@@ -33,6 +34,7 @@ __all__ = [
     "AccessLinkPolarClient",
     "AuthenticationFailed",
     "AuthorizationRequired",
+    "BodyWeight",
     "ConnectionFailed",
     "ConsentRequired",
     "Exercise",
@@ -93,6 +95,19 @@ class Exercise:
         return self.sport.lower() in sports or self.detailed_sport.lower() in sports
 
 
+@dataclass(frozen=True)
+class BodyWeight:
+    """The user's current weight in Polar, as a connector-side value.
+
+    `source` is Polar's `weight_source` verbatim ("" when absent). Which sources count as a real reading
+    is weight sync's policy, not this seam's. `effective_at` is when the value last changed, in UTC.
+    """
+
+    kilograms: float
+    source: str
+    effective_at: datetime
+
+
 @runtime_checkable
 class PolarClient(Protocol):
     """The sliver of Polar that `sync.py` depends on. Small enough to fake in one class."""
@@ -102,6 +117,8 @@ class PolarClient(Protocol):
     async def download_fit(self, exercise_id: str) -> bytes: ...
 
     async def download_fallback(self, exercise_id: str, fallback: FallbackFormat) -> bytes: ...
+
+    async def current_weight(self) -> BodyWeight | None: ...
 
     def current_rate_limit(self) -> RateLimitSnapshot: ...
 
@@ -127,6 +144,10 @@ class AccessLinkPolarClient:
 
         return await self._client.download_gpx(exercise_id)
 
+    async def current_weight(self) -> BodyWeight | None:
+        """None when Polar has no usable weight: no physical info, no positive value, or no date."""
+        return _body_weight(await self._client.get_physical_info())
+
     def current_rate_limit(self) -> RateLimitSnapshot:
         """What Polar reported on the most recent response, or an empty snapshot before the first."""
         return _snapshot(self._client.rate_limit)
@@ -140,6 +161,18 @@ def _domain(exercise: WireExercise) -> Exercise:
         detailed_sport=exercise.detailed_sport,
         device=exercise.device,
     )
+
+
+def _body_weight(info: PhysicalInfo | None) -> BodyWeight | None:
+    if info is None or info.weight is None or info.weight <= 0:
+        return None
+
+    # `modified` is when the value took effect; `created` covers a profile that never changed since.
+    effective_at = info.modified or info.created
+    if effective_at is None:
+        return None
+
+    return BodyWeight(kilograms=info.weight, source=info.weight_source or "", effective_at=effective_at)
 
 
 def _snapshot(limit: WireRateLimit) -> RateLimitSnapshot:

@@ -13,6 +13,7 @@ EXPECTED_NOUNS = {
     "CreatedWebhook",
     "WebhookInfo",
     "ExerciseEvent",
+    "PhysicalInfo",
 }
 
 EXPECTED_FUNCTIONS = {

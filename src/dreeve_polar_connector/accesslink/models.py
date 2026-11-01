@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Exercise(BaseModel):
@@ -56,6 +56,31 @@ class Exercise(BaseModel):
             )
 
         return {**data, "start_time": local.replace(tzinfo=timezone(timedelta(minutes=offset))).astimezone(UTC)}
+
+
+class PhysicalInfo(BaseModel):
+    """The user's current physical information, from `GET /v3/users/physical-info`.
+
+    Only what weight sync reads is modelled; the rest of the payload (height, heart rates, VO2max, …) is
+    ignored. `weight` is in kilograms. `weight_source` stays a plain string: Polar documents two
+    different enums for it, and the next value it adds must not turn a good response into a failure.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    weight: float | None = None
+    weight_source: str | None = None
+    created: datetime | None = None
+    modified: datetime | None = None
+
+    @field_validator("created", "modified")
+    @classmethod
+    def _to_utc(cls, value: datetime | None) -> datetime | None:
+        """Polar's schema says date-time without promising a zone; a naive value is read as UTC."""
+        if value is None:
+            return None
+
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 class RateLimit(BaseModel):

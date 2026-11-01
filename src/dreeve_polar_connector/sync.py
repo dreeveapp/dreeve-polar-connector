@@ -30,6 +30,7 @@ from dreeve_polar_connector.polar import (
     RateLimited,
     RateLimitSnapshot,
 )
+from dreeve_polar_connector.weight import WeightResult, WeightSync
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +61,16 @@ class CycleResult:
     skipped: int = 0
     without_file: int = 0
     backlog: int = 0
+    # None when weight sync is off.
+    weight: WeightResult | None = None
 
     def __str__(self) -> str:
-        return (
+        summary = (
             f"listed {self.listed}, delivered {self.delivered}, no file {self.without_file}, "
             f"skipped {self.skipped}, failed {self.failed}, {self.backlog} waiting for a later cycle"
         )
+
+        return f"{summary}, weight {self.weight.outcome}" if self.weight else summary
 
 
 class Sync:
@@ -78,6 +83,7 @@ class Sync:
         polar_user_id: int,
         clock: Clock,
         should_stop: Callable[[], bool] = lambda: False,
+        weight_sync: WeightSync | None = None,
     ) -> None:
         self._config = config
         self._ledger = ledger
@@ -86,6 +92,7 @@ class Sync:
         self._polar_user_id = polar_user_id
         self._clock = clock
         self._should_stop = should_stop
+        self._weight_sync = weight_sync
 
     @property
     def ledger(self) -> Ledger:
@@ -130,7 +137,7 @@ class Sync:
             for entry in batch:
                 logger.info("Would download exercise %s from %s", entry.exercise_id, entry.start_time.date())
             logger.info("Dry run: nothing downloaded, nothing written")
-            return CycleResult(listed=listed, backlog=len(candidates))
+            return CycleResult(listed=listed, backlog=len(candidates), weight=await self._weigh(started_at))
 
         if backlog:
             logger.info(
@@ -157,7 +164,16 @@ class Sync:
             skipped=counted[ExerciseStatus.SKIPPED],
             without_file=counted[ExerciseStatus.NO_FILE],
             backlog=len(backlog),
+            weight=await self._weigh(started_at),
         )
+
+    async def _weigh(self, started_at: datetime) -> WeightResult | None:
+        """Last, once the ledger is flushed: Polar's cycle-fatal errors still propagate from here, and
+        they must not cost what the exercise part of the cycle already delivered."""
+        if self._weight_sync is None:
+            return None
+
+        return await self._weight_sync.run_once(started_at)
 
     def _sync_start(self, now: datetime) -> datetime:
         """Whatever the first run resolved always wins, so `SINCE=now` never moves after a restart."""
